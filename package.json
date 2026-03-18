@@ -1,0 +1,21 @@
+{
+  "name": "shedit",
+  "private": true,
+  "type": "module",
+  "module": "src/index.ts",
+  "scripts": {
+    "test": "bun --hot test/test.ts"
+  },
+  "dependencies": {
+    "poseui": "^0.0.4",
+    "twoslash": "^0.3.6",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@types/bun": "latest"
+  },
+  "peerDependencies": {
+    "shiki": "^4",
+    "typescript": "^5"
+  }
+}
