@@ -42,7 +42,7 @@ function hashState(state: GrammarState | undefined): string {
   if (!state) return "";
   try {
     const scopes = state.getScopes();
-    return scopes ? scopes.join("|") : "";
+    return scopes ? JSON.stringify(scopes) : "";
   } catch {
     return "";
   }
@@ -147,6 +147,8 @@ export function createShikiEditor(
   let tokenizeAbortController = new AbortController();
   let value = "";
   let disposed = false;
+  let lastCursorLine = -1;
+  let scrollRafId = 0;
 
   // ── DOM Setup ──────────────────────────────────────────────────────────────
   //
@@ -190,6 +192,7 @@ export function createShikiEditor(
         font-family: inherit;
         font-size: inherit;
         line-height: inherit;
+        contain: strict;
       `,
     )
     .cls(uid);
@@ -260,6 +263,7 @@ export function createShikiEditor(
             user-select: none;
             cursor: pointer;
             z-index: 2;
+            contain: content;
           `
         : "display: none;",
     );
@@ -273,11 +277,13 @@ export function createShikiEditor(
   const textarea = container.querySelector<HTMLTextAreaElement>("#shedit-textarea");
 
   // ── Viewport rendering ─────────────────────────────────────────────────────
-  //
-  // Both the textarea and the mirror use pre-wrap with identical font/padding,
-  // so soft-wrap is identical in both. We render ALL highlighted HTML into the
-  // mirror and let the browser handle layout. The textarea scrolls; we sync
-  // the mirror's scrollTop to match.
+
+  function getCursorLine(): number {
+    if (!textarea) return 0;
+    const cursorPos = textarea.selectionStart ?? 0;
+    const textBeforeCursor = textarea.value.slice(0, cursorPos);
+    return textBeforeCursor.split("\n").length - 1;
+  }
 
   function getLineNumberHtml(lineIndex: number, cursorLine: number): string {
     if (!lineNumber) return "";
@@ -286,21 +292,21 @@ export function createShikiEditor(
     if (lineNumber === "absolute") {
       num = lineIndex + 1;
     } else {
-      // relative - shows distance from cursor line (0 on current line)
       num = Math.abs(lineIndex - cursorLine);
     }
     return `<div style="height:${lineHeight}px;line-height:${lineHeight}px">${num}</div>`;
   }
 
   function renderGutter() {
-    if (!lineNumber) return;
-    if (!textarea) return;
-    if (!gutter) return;
+    if (!lineNumber || !textarea || !gutter) return;
 
-    // Find cursor line based on selection
-    const cursorPos = textarea.selectionStart ?? 0;
-    const textBeforeCursor = textarea.value.slice(0, cursorPos);
-    const cursorLine = textBeforeCursor.split("\n").length - 1;
+    const cursorLine = getCursorLine();
+
+    // Skip rebuild when cursor line and line count haven't changed.
+    if (cursorLine === lastCursorLine && gutter.childElementCount === lines.length) {
+      return;
+    }
+    lastCursorLine = cursorLine;
 
     let html = "";
     for (let i = 0; i < lines.length; i++) {
@@ -311,20 +317,51 @@ export function createShikiEditor(
   }
 
   function renderViewport() {
-    if (!textarea) return;
-    if (!mirror) return;
+    if (!textarea || !mirror) return;
 
-    // Full render — the browser handles soft-wrap layout for us.
-    // For very large documents (10k+ lines) this could be swapped for a
-    // measured virtualisation pass, but for typical editor use (<5k lines)
-    // a full innerHTML write is fast enough (~1-3ms).
     let html = "";
     for (let i = 0; i < lines.length; i++) {
       html += lines[i]!.html;
     }
     mirror.innerHTML = html;
 
-    // Sync scroll position so highlight aligns with textarea caret.
+    mirror.scrollTop = textarea.scrollTop;
+    mirror.scrollLeft = textarea.scrollLeft;
+
+    renderGutter();
+  }
+
+  /**
+   * Surgically update a single line's DOM node in the mirror instead of
+   * rebuilding the entire innerHTML. Returns true if the fast path succeeded.
+   */
+  function patchMirrorLine(index: number, html: string): boolean {
+    if (!mirror) return false;
+    // Mirror contains one text node per line (each line's html ends with \n).
+    // After a full renderViewport the structure is a flat list of child nodes —
+    // some are spans, some are raw text. However, because each line's html is
+    // concatenated and set via innerHTML, the browser doesn't guarantee one
+    // child node per line. We can only use this fast path when the mirror has
+    // been built with wrapper elements.
+    //
+    // A more reliable approach: wrap each line in a <span data-line> during
+    // render so we can address them individually.
+    const lineNode = mirror.querySelector(`[data-line="${index}"]`);
+    if (!lineNode) return false;
+    lineNode.innerHTML = html;
+    return true;
+  }
+
+  /** Full render with per-line wrapper spans for surgical updates. */
+  function renderViewportWrapped() {
+    if (!textarea || !mirror) return;
+
+    let html = "";
+    for (let i = 0; i < lines.length; i++) {
+      html += `<span data-line="${i}" style="display:contents">${lines[i]!.html}</span>`;
+    }
+    mirror.innerHTML = html;
+
     mirror.scrollTop = textarea.scrollTop;
     mirror.scrollLeft = textarea.scrollLeft;
 
@@ -345,8 +382,6 @@ export function createShikiEditor(
       const prevState = i > 0 ? lines[i - 1]?.grammarState : undefined;
       const prevHash = hashState(prevState);
 
-      // If this line is clean and its input grammar state hasn't changed,
-      // no lines after it can change either — stop early.
       if (!line.dirty && line.grammarHash === prevHash) break;
 
       let result: ReturnType<typeof shiki.codeToTokens>;
@@ -370,16 +405,18 @@ export function createShikiEditor(
       line.dirty = false;
       changed = true;
 
-      // Yield periodically to keep the main thread responsive.
+      // Try surgical update first; fall back to full render.
       if (i % 50 === 0 && changed) {
-        renderViewport();
+        renderViewportWrapped();
         changed = false;
         await yieldToMain();
+      } else if (changed) {
+        patchMirrorLine(i, line.html);
       }
     }
 
     if (!signal.aborted && changed) {
-      renderViewport();
+      renderViewportWrapped();
     }
   }
 
@@ -409,7 +446,22 @@ export function createShikiEditor(
 
     lines.splice(start, oldEnd - start, ...replacements);
     value = newValue;
-    renderViewport();
+
+    // Single-line edit fast path: surgically update just the changed line
+    // in the mirror DOM instead of a full innerHTML rebuild.
+    if (replacements.length === 1 && oldEnd - start === 1 && mirror) {
+      const patched = patchMirrorLine(start, replacements[0]!.html);
+      if (patched) {
+        // Sync scroll in case content height changed.
+        mirror.scrollTop = textarea!.scrollTop;
+        mirror.scrollLeft = textarea!.scrollLeft;
+        renderGutter();
+        scheduleTokenize(start);
+        return;
+      }
+    }
+
+    renderViewportWrapped();
     scheduleTokenize(start);
   }
 
@@ -436,7 +488,6 @@ export function createShikiEditor(
         const after = textarea.value.slice(end);
         const selected = textarea.value.slice(start, end);
 
-        // Find the start of the first selected line
         const lineStart = before.lastIndexOf("\n") + 1;
         const prefix = textarea.value.slice(lineStart, start);
         const block = prefix + selected;
@@ -446,15 +497,14 @@ export function createShikiEditor(
         const next = textarea.value.slice(0, lineStart) + dedented + after;
         textarea.value = next;
 
-        // Adjust selection — the start may have shifted
-        const prefixRemoved = prefix.length - dedented.split("\n")[0]!.length;
+        // Clamp prefixRemoved to avoid negative offsets.
+        const prefixRemoved = Math.max(0, prefix.length - dedented.split("\n")[0]!.length);
         textarea.selectionStart = Math.max(lineStart, start - prefixRemoved);
         textarea.selectionEnd = end - removed;
 
         applyEdit(next);
         onChange?.(next);
       } else {
-        // Indent
         const next = textarea.value.slice(0, start) + tab + textarea.value.slice(end);
         textarea.value = next;
         textarea.selectionStart = textarea.selectionEnd = start + tabSize;
@@ -465,19 +515,25 @@ export function createShikiEditor(
   }
 
   function onScroll() {
-    if (!textarea) return;
-    if (!mirror) return;
-    if (!gutter) return;
+    // Batch scroll sync into a single rAF to avoid layout thrashing.
+    if (scrollRafId) return;
+    scrollRafId = requestAnimationFrame(() => {
+      scrollRafId = 0;
+      if (!textarea || !mirror || !gutter) return;
+      mirror.scrollTop = textarea.scrollTop;
+      mirror.scrollLeft = textarea.scrollLeft;
+      gutter.scrollTop = textarea.scrollTop;
+    });
+  }
 
-    mirror.scrollTop = textarea.scrollTop;
-    mirror.scrollLeft = textarea.scrollLeft;
-    gutter.scrollTop = textarea.scrollTop;
+  function onSelectionChange() {
+    // Only react if our textarea is focused.
+    if (document.activeElement !== textarea) return;
+    renderGutter();
   }
 
   function onGutterClick(e: MouseEvent) {
-    if (!lineNumber) return;
-    if (!textarea) return;
-    if (!gutter) return;
+    if (!lineNumber || !textarea || !gutter) return;
 
     const rect = gutter.getBoundingClientRect();
     const paddingTop = 16; // matches 1rem padding in gutter style
@@ -486,27 +542,27 @@ export function createShikiEditor(
 
     if (lineIndex < 0 || lineIndex >= lines.length) return;
 
-    // Calculate character positions for the line
     let lineStart = 0;
     for (let i = 0; i < lineIndex; i++) {
-      lineStart += lines[i]!.text.length + 1; // +1 for newline
+      lineStart += lines[i]!.text.length + 1;
     }
     const lineEnd = lineStart + lines[lineIndex]!.text.length;
 
-    // Select all characters in the line
     textarea.focus();
     textarea.selectionStart = lineStart;
     textarea.selectionEnd = lineEnd;
 
-    // Re-render gutter to update relative line numbers if needed
     renderGutter();
   }
 
   textarea?.addEventListener("input", onInput);
   textarea?.addEventListener("keydown", onKeydown);
   textarea?.addEventListener("scroll", onScroll, { passive: true });
-  textarea?.addEventListener("click", () => renderGutter());
-  textarea?.addEventListener("keyup", () => renderGutter());
+
+  // Use selectionchange instead of separate click + keyup listeners.
+  // This catches all selection changes: arrow keys, shift+arrows, mouse
+  // drags, Cmd+A, triple-click, etc.
+  document.addEventListener("selectionchange", onSelectionChange);
 
   if (lineNumber) {
     gutter?.addEventListener("click", onGutterClick);
@@ -529,12 +585,15 @@ export function createShikiEditor(
     disposed = true;
     tokenizeAbortController.abort();
 
-    // Remove event listeners to prevent leaks.
+    if (scrollRafId) {
+      cancelAnimationFrame(scrollRafId);
+      scrollRafId = 0;
+    }
+
     textarea?.removeEventListener("input", onInput);
     textarea?.removeEventListener("keydown", onKeydown);
     textarea?.removeEventListener("scroll", onScroll);
-    textarea?.removeEventListener("click", renderGutter);
-    textarea?.removeEventListener("keyup", renderGutter);
+    document.removeEventListener("selectionchange", onSelectionChange);
 
     if (lineNumber) {
       gutter?.removeEventListener("click", onGutterClick);
