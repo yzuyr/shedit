@@ -1,12 +1,24 @@
 {
   "name": "shedit",
-  "private": true,
+  "version": "0.0.1",
+  "description": "Shiki highlighted textarea",
+  "license": "MIT",
+  "author": "Ryuz <ryuzer@proton.me>",
+  "files": [
+    "dist"
+  ],
   "type": "module",
   "module": "src/index.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
   "scripts": {
     "build": "tsdown",
     "test": "bun --hot test/index.html",
-    "demo": "bun build test/index.html",
+    "demo": "bun build test/index.html --outdir demo",
     "fmt": "oxfmt"
   },
   "dependencies": {
