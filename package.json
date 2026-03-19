@@ -4,15 +4,20 @@
   "type": "module",
   "module": "src/index.ts",
   "scripts": {
-    "test": "bun --hot test/test.ts"
+    "build": "tsdown",
+    "test": "bun --hot test/index.html",
+    "demo": "bun build test/index.html",
+    "fmt": "oxfmt"
   },
   "dependencies": {
     "poseui": "^0.0.4",
-    "twoslash": "^0.3.6",
-    "zod": "^4.3.6"
+    "twoslash": "^0.3.6"
   },
   "devDependencies": {
-    "@types/bun": "latest"
+    "@types/bun": "latest",
+    "oxfmt": "^0.41.0",
+    "tsdown": "^0.21.4",
+    "zod": "^4.3.6"
   },
   "peerDependencies": {
     "shiki": "^4",

@@ -1,0 +1,42 @@
+name: continuous-integration
+on:
+  push:
+    branches: ["main"]
+jobs:
+  nightly:
+    name: Nightly build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - name: Install dependencies
+        run: bun install
+      - name: Build
+        run: bun run build
+      - name: Publish nightly
+        run: bunx pkg-pr-new publish
+  demo:
+    name: Publish demo
+    needs: nightly
+    runs-on: ubuntu-latest
+    # Grant GITHUB_TOKEN the permissions required to make a Pages deployment
+    permissions:
+      pages: write
+      id-token: write
+    # Deploy to the github-pages environment
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - name: Install dependencies
+        run: bun install
+      - name: Build demo
+        run: bun run demo
+      - name: Upload static files as artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist/
+      - name: Deploy to GitHub Pages
+        uses: actions/deploy-pages@v4
