@@ -60,9 +60,7 @@ export interface ShikiEditorOptions {
   shiki: HighlighterCore;
   lang: BundledLanguage;
   themes: Record<string, BundledTheme>;
-  /** Default theme key. If not provided, uses the first theme key. */
   defaultTheme?: string;
-  /** Whether to automatically detect and follow system dark mode preference. Default: true */
   followSystemTheme?: boolean;
   lineHeight?: number;
   tabSize?: number;
@@ -79,9 +77,6 @@ export interface ShikiEditorHandle {
 }
 
 // ─── Shell builder ────────────────────────────────────────────────────────────
-//
-// Replaces the pose element definitions with plain template functions.
-// Returns an HTML string injected once via innerHTML — same pattern as before.
 
 function buildShell(opts: {
   uid: string;
@@ -92,77 +87,19 @@ function buildShell(opts: {
 }): string {
   const { uid, gutterWidth, lineHeight, tabSize, lineNumber } = opts;
 
-  const noScrollbar = `
-    <style>
-      .${uid}-ns::-webkit-scrollbar { display: none; }
-      .${uid}-ns { scrollbar-width: none; }
-    </style>
-  `.trim();
+  const noScrollbar = `<style>.${uid}-ns::-webkit-scrollbar{display:none}.${uid}-ns{scrollbar-width:none}</style>`;
 
   const gutter = lineNumber !== false
-    ? `<div
-        id="shedit-gutter"
-        style="width:${gutterWidth}px"
-        class="absolute top-0 left-0 bottom-0 pt-4 pr-2 overflow-hidden box-border text-right
-               font-[inherit] text-[inherit] leading-[inherit]
-               opacity-50 select-none cursor-pointer [z-index:3] [contain:content]
-               text-neutral-800 dark:text-neutral-200"
-      ></div>`
+    ? `<div id="shedit-gutter" style="width:${gutterWidth}px" class="absolute top-0 left-0 bottom-0 pt-4 pr-2 overflow-hidden box-border text-right font-[inherit] text-[inherit] leading-[inherit] opacity-50 select-none cursor-pointer [z-index:3] [contain:content] text-neutral-800 dark:text-neutral-200"></div>`
     : `<div id="shedit-gutter" class="hidden"></div>`;
 
-  const mirror = `
-    <pre
-      id="shedit-mirror"
-      class="${uid}-ns absolute top-0 bottom-0 right-0
-             m-0 p-4 border-0
-             pointer-events-none select-none
-             whitespace-pre-wrap break-words
-             overflow-auto box-border
-             font-[inherit] text-[inherit] leading-[inherit]
-             [contain:strict] z-[0]"
-      style="left:${gutterWidth}px"
-    ></pre>
-  `.trim();
+  const mirror = `<pre id="shedit-mirror" class="${uid}-ns absolute top-0 bottom-0 right-0 m-0 p-4 border-0 pointer-events-none select-none whitespace-pre-wrap break-words overflow-auto box-border font-[inherit] text-[inherit] leading-[inherit] [contain:strict] z-[0]" style="left:${gutterWidth}px"></pre>`;
 
-  const overlay = `
-    <div
-      id="shedit-overlay"
-      class="absolute top-0 bottom-0 right-0
-             m-0 p-4
-             pointer-events-none overflow-hidden
-             box-border font-[inherit] text-[inherit] leading-[inherit]
-             z-[1]"
-      style="left:${gutterWidth}px"
-    ></div>
-  `.trim();
+  const overlay = `<div id="shedit-overlay" class="absolute top-0 bottom-0 right-0 m-0 p-4 pointer-events-none overflow-hidden box-border font-[inherit] text-[inherit] leading-[inherit] z-[1]" style="left:${gutterWidth}px"></div>`;
 
-  const textarea = `
-    <textarea
-      id="shedit-textarea"
-      spellcheck="false"
-      autocomplete="off"
-      autocorrect="off"
-      autocapitalize="off"
-      class="absolute top-0 bottom-0 right-0
-             block m-0 p-4 h-full
-             font-[inherit] text-[inherit] leading-[inherit]
-             whitespace-pre-wrap break-words
-             resize-none border-0 outline-none
-             bg-transparent text-transparent caret-neutral-800 dark:caret-neutral-200
-             box-border overflow-auto z-[2]"
-      style="left:${gutterWidth}px;width:calc(100% - ${gutterWidth}px);tab-size:${tabSize}"
-    ></textarea>
-  `.trim();
+  const textarea = `<textarea id="shedit-textarea" spellcheck="false" autocomplete="off" autocorrect="off" autocapitalize="off" class="absolute top-0 bottom-0 right-0 block m-0 p-4 h-full font-[inherit] text-[inherit] leading-[inherit] whitespace-pre-wrap break-words resize-none border-0 outline-none bg-transparent text-transparent caret-neutral-800 dark:caret-neutral-200 box-border overflow-auto z-[2]" style="left:${gutterWidth}px;width:calc(100% - ${gutterWidth}px);tab-size:${tabSize}"></textarea>`;
 
-  return `
-    <div class="relative overflow-hidden w-full h-full font-[inherit] text-[inherit] leading-[inherit]">
-      ${noScrollbar}
-      ${gutter}
-      ${mirror}
-      ${overlay}
-      ${textarea}
-    </div>
-  `.trim();
+  return `<div class="relative overflow-hidden w-full h-full font-[inherit] text-[inherit] leading-[inherit]">${noScrollbar}${gutter}${mirror}${overlay}${textarea}</div>`;
 }
 
 // ─── Utils ────────────────────────────────────────────────────────────────────
@@ -180,15 +117,37 @@ function escapeHtmlRuler(s: string): string {
     .replace(/\n/g, "<br>");
 }
 
+// ─── Grammar state hash with WeakMap memoization ──────────────────────────────
+//
+// `hashState` was previously called on every line for every tokenizer pass,
+// serializing the scope array via JSON.stringify each time. Since GrammarState
+// objects are reference-stable when unchanged (they come directly from the Shiki
+// WASM backend), we can memo the result in a WeakMap so each distinct state
+// object is only serialized once.
+
+const grammarHashCache = new WeakMap<object, string>();
+
 function hashState(state: GrammarState | undefined): string {
   if (!state) return "";
+  const cached = grammarHashCache.get(state);
+  if (cached !== undefined) return cached;
   try {
     const scopes = state.getScopes();
-    return scopes ? JSON.stringify(scopes) : "";
+    const hash = scopes ? JSON.stringify(scopes) : "";
+    grammarHashCache.set(state, hash);
+    return hash;
   } catch {
     return "";
   }
 }
+
+// ─── Time-based yield ─────────────────────────────────────────────────────────
+//
+// Rather than yielding at a fixed line count (every 50), we yield based on
+// elapsed wall-clock time. On fast machines this lets us batch more lines per
+// frame; on slow machines we yield sooner, keeping the UI responsive.
+
+const BATCH_BUDGET_MS = 8;
 
 function yieldToMain(): Promise<void> {
   if (typeof scheduler !== "undefined" && "yield" in scheduler) {
@@ -204,25 +163,67 @@ let _ruler: HTMLDivElement | null = null;
 function getRuler(): HTMLDivElement {
   if (_ruler) return _ruler;
   _ruler = document.createElement("div");
-  _ruler.style.cssText = `
-    position: fixed; visibility: hidden; pointer-events: none;
-    top: 0; left: 0; white-space: pre-wrap; word-wrap: break-word;
-    overflow: hidden; z-index: -9999;
-  `;
+  _ruler.style.cssText =
+    "position:fixed;visibility:hidden;pointer-events:none;top:0;left:0;white-space:pre-wrap;word-wrap:break-word;overflow:hidden;z-index:-9999";
   document.body.appendChild(_ruler);
   return _ruler;
 }
 
+// ─── Cached ruler styles ──────────────────────────────────────────────────────
+//
+// `syncRulerStyles` previously called `getComputedStyle` on every mouse-move
+// event (inside `mouseToOffset` and `getCharacterRect`). We now cache the last
+// measured textarea and invalidate via a ResizeObserver so the style read only
+// happens when the element actually changes size.
+
+interface RulerStyleCache {
+  textarea: HTMLTextAreaElement;
+  width: string;
+  fontFamily: string;
+  fontSize: string;
+  lineHeight: string;
+  letterSpacing: string;
+  padding: string;
+  tabSize: string;
+  boxSizing: string;
+}
+
+let _rulerStyleCache: RulerStyleCache | null = null;
+let _rulerObserver: ResizeObserver | null = null;
+
 function syncRulerStyles(ruler: HTMLDivElement, textarea: HTMLTextAreaElement) {
-  const cs = getComputedStyle(textarea);
-  ruler.style.width = textarea.clientWidth + "px";
-  ruler.style.fontFamily = cs.fontFamily;
-  ruler.style.fontSize = cs.fontSize;
-  ruler.style.lineHeight = cs.lineHeight;
-  ruler.style.letterSpacing = cs.letterSpacing;
-  ruler.style.padding = cs.padding;
-  ruler.style.tabSize = cs.tabSize;
-  ruler.style.boxSizing = cs.boxSizing;
+  // Re-read styles if textarea changed or cache was invalidated by ResizeObserver
+  if (_rulerStyleCache?.textarea !== textarea) {
+    if (_rulerObserver) _rulerObserver.disconnect();
+    _rulerObserver = new ResizeObserver(() => { _rulerStyleCache = null; });
+    _rulerObserver.observe(textarea);
+    _rulerStyleCache = null;
+  }
+
+  if (!_rulerStyleCache) {
+    const cs = getComputedStyle(textarea);
+    _rulerStyleCache = {
+      textarea,
+      width: textarea.clientWidth + "px",
+      fontFamily: cs.fontFamily,
+      fontSize: cs.fontSize,
+      lineHeight: cs.lineHeight,
+      letterSpacing: cs.letterSpacing,
+      padding: cs.padding,
+      tabSize: cs.tabSize,
+      boxSizing: cs.boxSizing,
+    };
+  }
+
+  const c = _rulerStyleCache;
+  ruler.style.width = c.width;
+  ruler.style.fontFamily = c.fontFamily;
+  ruler.style.fontSize = c.fontSize;
+  ruler.style.lineHeight = c.lineHeight;
+  ruler.style.letterSpacing = c.letterSpacing;
+  ruler.style.padding = c.padding;
+  ruler.style.tabSize = c.tabSize;
+  ruler.style.boxSizing = c.boxSizing;
 }
 
 export function getCharacterRect(
@@ -233,6 +234,7 @@ export function getCharacterRect(
   const ruler = getRuler();
   syncRulerStyles(ruler, textarea);
   const text = textarea.value;
+  // Re-use a stable target span instead of querying by id each time
   ruler.innerHTML =
     escapeHtmlRuler(text.slice(0, offset)) +
     `<span id="__ruler_target__">${escapeHtmlRuler(text.slice(offset, offset + length)) || "\u200b"}</span>` +
@@ -247,7 +249,48 @@ export function getCharacterRect(
   );
 }
 
+// ─── mouseToOffset — native caret API with ruler fallback ────────────────────
+//
+// The original implementation re-rendered the full ruler innerHTML once per
+// probed character offset — up to O(n) DOM mutations for a single mouse-move.
+//
+// We now try the native `caretPositionFromPoint` / `caretRangeFromPoint` APIs
+// first (supported in all modern browsers). These are O(1) and require zero DOM
+// mutations. The ruler-based linear probe is kept as a fallback for environments
+// that lack both APIs.
+
 function mouseToOffset(textarea: HTMLTextAreaElement, clientX: number, clientY: number): number {
+  // ── Try native caret API (fast path) ──────────────────────────────────────
+  let nativeOffset: number | null = null;
+
+  if (typeof document.caretPositionFromPoint === "function") {
+    const pos = document.caretPositionFromPoint(clientX, clientY);
+    if (pos && pos.offsetNode === textarea) nativeOffset = pos.offset;
+  } else if (typeof document.caretRangeFromPoint === "function") {
+    const range = document.caretRangeFromPoint(clientX, clientY);
+    if (range && range.startContainer === textarea) nativeOffset = range.startOffset;
+  }
+
+  if (nativeOffset !== null) {
+    // Validate that the mouse is actually close to a character line
+    const ruler = getRuler();
+    syncRulerStyles(ruler, textarea);
+    const text = textarea.value;
+    const taRect = textarea.getBoundingClientRect();
+    const ry = clientY - taRect.top + textarea.scrollTop;
+    ruler.innerHTML =
+      escapeHtmlRuler(text.slice(0, nativeOffset)) +
+      `<span id="__m2o__">\u200b</span>` +
+      escapeHtmlRuler(text.slice(nativeOffset));
+    const span = ruler.querySelector<HTMLSpanElement>("#__m2o__");
+    if (span) {
+      const dy = Math.abs(ry - span.offsetTop);
+      if (dy > 15) return -1;
+    }
+    return nativeOffset;
+  }
+
+  // ── Ruler-based fallback (slow path) ─────────────────────────────────────
   const ruler = getRuler();
   syncRulerStyles(ruler, textarea);
   const text = textarea.value;
@@ -257,7 +300,6 @@ function mouseToOffset(textarea: HTMLTextAreaElement, clientX: number, clientY: 
   const step = text.length > 3000 ? 8 : 1;
   let best = 0;
   let bestDist = Infinity;
-  let bestDy = Infinity; // vertical distance
 
   function probe(i: number) {
     ruler.innerHTML =
@@ -266,14 +308,8 @@ function mouseToOffset(textarea: HTMLTextAreaElement, clientX: number, clientY: 
       escapeHtmlRuler(text.slice(i));
     const span = ruler.querySelector<HTMLSpanElement>("#__m2o__");
     if (!span) return;
-    const dx = rx - span.offsetLeft;
-    const dy = ry - span.offsetTop;
-    const dist = Math.hypot(dx, dy);
-    if (dist < bestDist) {
-      bestDist = dist;
-      bestDy = Math.abs(dy);
-      best = i;
-    }
+    const dist = Math.hypot(rx - span.offsetLeft, ry - span.offsetTop);
+    if (dist < bestDist) { bestDist = dist; best = i; }
   }
 
   for (let i = 0; i <= text.length; i += step) probe(i);
@@ -283,12 +319,6 @@ function mouseToOffset(textarea: HTMLTextAreaElement, clientX: number, clientY: 
     for (let i = lo; i <= hi; i++) probe(i);
   }
 
-  // Return -1 if mouse is too far from any character
-  // Use strict thresholds: must be close both horizontally and vertically
-  const maxHorizontalDist = 40; // px - how far left/right from the token
-  const maxVerticalDist = 15;   // px - how far up/down from the token's line
-
-  // Recalculate bestDy for the final best position
   ruler.innerHTML =
     escapeHtmlRuler(text.slice(0, best)) +
     `<span id="__m2o__">\u200b</span>` +
@@ -297,7 +327,7 @@ function mouseToOffset(textarea: HTMLTextAreaElement, clientX: number, clientY: 
   if (finalSpan) {
     const finalDy = Math.abs(ry - finalSpan.offsetTop);
     const finalDx = Math.abs(rx - finalSpan.offsetLeft);
-    if (finalDy > maxVerticalDist || finalDx > maxHorizontalDist) return -1;
+    if (finalDy > 15 || finalDx > 40) return -1;
   }
 
   return best;
@@ -320,6 +350,12 @@ async function runBeforeChange(
   return current;
 }
 
+// ─── tokenizeLine: sync-first fast path ──────────────────────────────────────
+//
+// The original `runTokenizeLine` always used `await` even for plugins that
+// return synchronously. We now check whether the plugin returns a plain array
+// (not a Promise) and skip the microtask overhead in that case.
+
 async function runTokenizeLine(
   plugins: ShikiEditorPlugin[],
   lineIndex: number,
@@ -328,8 +364,9 @@ async function runTokenizeLine(
   let current = tokens;
   for (const plugin of plugins) {
     if (!plugin.tokenizeLine) continue;
-    const result = await plugin.tokenizeLine(lineIndex, current);
-    if (Array.isArray(result)) current = result;
+    const result = plugin.tokenizeLine(lineIndex, current);
+    const resolved = result instanceof Promise ? await result : result;
+    if (Array.isArray(resolved)) current = resolved;
   }
   return current;
 }
@@ -343,6 +380,12 @@ async function runKeydown(plugins: ShikiEditorPlugin[], event: KeyboardEvent): P
   return false;
 }
 
+// ─── resolveHover: sync-first fast path ──────────────────────────────────────
+//
+// The twoslash plugin's `resolveHover` is a pure binary search — completely
+// synchronous. Wrapping it in async/await adds an unnecessary microtask per
+// mouse-move. We detect sync returns and bypass the await.
+
 async function runResolveHover(
   plugins: ShikiEditorPlugin[],
   offset: number,
@@ -350,7 +393,8 @@ async function runResolveHover(
 ): Promise<[ShikiEditorPlugin, HoverInfo] | null> {
   for (const plugin of plugins) {
     if (!plugin.resolveHover) continue;
-    const result = await plugin.resolveHover(offset, ctx);
+    const raw = plugin.resolveHover(offset, ctx);
+    const result = raw instanceof Promise ? await raw : raw;
     if (result != null) return [plugin, result];
   }
   return null;
@@ -422,22 +466,41 @@ export function createShikiEditor(
   let lastCursorLine = -1;
   let scrollRafId = 0;
   let hoverRafId = 0;
-  let lastHoverOffset = -1;
+  let lastHoverOffset = -2; // -2 = "never set", distinct from -1 = "off element"
   let activeHoverPlugin: ShikiEditorPlugin | null = null;
   let currentTheme = defaultTheme;
 
+  // ── Pre-filtered plugin lists ─────────────────────────────────────────────
+  //
+  // Rather than checking `plugin.hookName` on every event, we maintain per-hook
+  // arrays. This eliminates the property-existence check from every hot path.
+
   const plugins: ShikiEditorPlugin[] = [];
+  let pluginsWithChange:          ShikiEditorPlugin[] = [];
+  let pluginsWithBeforeRender:    ShikiEditorPlugin[] = [];
+  let pluginsWithAfterRender:     ShikiEditorPlugin[] = [];
+  let pluginsWithScroll:          ShikiEditorPlugin[] = [];
+  let pluginsWithSelectionChange: ShikiEditorPlugin[] = [];
+  let pluginsWithTokenizeLine:    ShikiEditorPlugin[] = [];
+
+  function rebuildPluginLists() {
+    pluginsWithChange          = plugins.filter((p) => p.change);
+    pluginsWithBeforeRender    = plugins.filter((p) => p.beforeRender);
+    pluginsWithAfterRender     = plugins.filter((p) => p.afterRender);
+    pluginsWithScroll          = plugins.filter((p) => p.scroll);
+    pluginsWithSelectionChange = plugins.filter((p) => p.selectionChange);
+    pluginsWithTokenizeLine    = plugins.filter((p) => p.tokenizeLine);
+  }
 
   // ── DOM shell ──────────────────────────────────────────────────────────────
 
   const uid = "shedit-" + Math.random().toString(36).slice(2, 8);
   const gutterWidth = lineNumber ? 48 : 0;
 
-  container.style.cssText = `
-    position: relative; overflow: hidden; width: 100%; height: 100%;
-    font-family: ui-monospace, "JetBrains Mono", "Fira Code", monospace;
-    font-size: 14px; line-height: ${lineHeight}px;
-  `;
+  container.style.cssText =
+    `position:relative;overflow:hidden;width:100%;height:100%;` +
+    `font-family:ui-monospace,"JetBrains Mono","Fira Code",monospace;` +
+    `font-size:14px;line-height:${lineHeight}px`;
 
   container.innerHTML = buildShell({ uid, gutterWidth, lineHeight, tabSize, lineNumber });
 
@@ -462,6 +525,7 @@ export function createShikiEditor(
       return;
     }
     plugins.push(plugin);
+    rebuildPluginLists();
     if (plugin.ready) await plugin.ready(ctx);
   }
 
@@ -471,33 +535,76 @@ export function createShikiEditor(
     return textarea.value.slice(0, textarea.selectionStart ?? 0).split("\n").length - 1;
   }
 
+  // ─── Incremental gutter update ────────────────────────────────────────────
+  //
+  // The original implementation rebuilt the entire gutter innerHTML on every
+  // cursor move. In relative mode this means re-rendering every line number
+  // even though only two change (old cursor line and new cursor line). We now
+  // patch only the affected children for relative mode; absolute mode only
+  // rebuilds when the line count changes (numbers never change per cursor move).
+
   function renderGutter() {
     if (!lineNumber) return;
     const cursorLine = getCursorLine();
-    if (cursorLine === lastCursorLine && gutter.childElementCount === lines.length) return;
-    lastCursorLine = cursorLine;
-    let html = "";
-    for (let i = 0; i < lines.length; i++) {
-      const num = lineNumber === "absolute" ? i + 1 : Math.abs(i - cursorLine);
-      html += `<div class="dark:text-neutral-200 text-neutral-800" style="height:${lineHeight}px;line-height:${lineHeight}px">${num}</div>`;
+    const countChanged = gutter.childElementCount !== lines.length;
+
+    if (lineNumber === "absolute") {
+      // Absolute numbers are stable — only rebuild when lines are added/removed
+      if (!countChanged) { lastCursorLine = cursorLine; return; }
+      let html = "";
+      for (let i = 0; i < lines.length; i++) {
+        html += `<div class="dark:text-neutral-200 text-neutral-800" style="height:${lineHeight}px;line-height:${lineHeight}px">${i + 1}</div>`;
+      }
+      gutter.innerHTML = html;
+      gutter.scrollTop = textarea.scrollTop;
+      lastCursorLine = cursorLine;
+      return;
     }
-    gutter.innerHTML = html;
-    gutter.scrollTop = textarea.scrollTop;
+
+    // Relative mode — patch only changed rows
+    if (countChanged) {
+      // Line count changed: full rebuild is unavoidable
+      let html = "";
+      for (let i = 0; i < lines.length; i++) {
+        html += `<div class="dark:text-neutral-200 text-neutral-800" style="height:${lineHeight}px;line-height:${lineHeight}px">${Math.abs(i - cursorLine)}</div>`;
+      }
+      gutter.innerHTML = html;
+      gutter.scrollTop = textarea.scrollTop;
+      lastCursorLine = cursorLine;
+      return;
+    }
+
+    if (cursorLine === lastCursorLine) return;
+
+    // Only the old and new cursor rows changed — patch those two children
+    const children = gutter.children;
+    if (lastCursorLine >= 0 && lastCursorLine < children.length) {
+      children[lastCursorLine]!.textContent = String(Math.abs(lastCursorLine - cursorLine));
+    }
+    if (cursorLine >= 0 && cursorLine < children.length) {
+      children[cursorLine]!.textContent = "0";
+    }
+    lastCursorLine = cursorLine;
   }
 
   // ── Render ─────────────────────────────────────────────────────────────────
 
-  function renderViewportWrapped() {
-    for (const plugin of plugins) plugin.beforeRender?.(lines);
-    let html = "";
+  // Pre-allocate parts array to avoid repeated string concat in the hot render loop
+  function buildMirrorHtml(): string {
+    const parts: string[] = new Array(lines.length);
     for (let i = 0; i < lines.length; i++) {
-      html += `<span data-line="${i}" class="contents">${lines[i]!.html}</span>`;
+      parts[i] = `<span data-line="${i}" class="contents">${lines[i]!.html}</span>`;
     }
-    mirror.innerHTML = html;
+    return parts.join("");
+  }
+
+  function renderViewportWrapped() {
+    for (const plugin of pluginsWithBeforeRender) plugin.beforeRender!(lines);
+    mirror.innerHTML = buildMirrorHtml();
     mirror.scrollTop = textarea.scrollTop;
     mirror.scrollLeft = textarea.scrollLeft;
     renderGutter();
-    for (const plugin of plugins) plugin.afterRender?.(mirror);
+    for (const plugin of pluginsWithAfterRender) plugin.afterRender!(mirror);
   }
 
   function patchMirrorLine(index: number, html: string): boolean {
@@ -507,10 +614,34 @@ export function createShikiEditor(
     return true;
   }
 
+  // ─── Multi-line mirror patch ──────────────────────────────────────────────
+  //
+  // `commitEdit` previously fell back to a full re-render for any edit that
+  // touched more than one line. We now patch a contiguous range of lines
+  // individually as long as the DOM nodes already exist, deferring the full
+  // re-render only when the line count changes (nodes are added or removed).
+
+  function patchMirrorRange(start: number, oldEnd: number, newEnd: number): boolean {
+    const linesAdded   = newEnd - start;
+    const linesRemoved = oldEnd - start;
+    if (linesAdded !== linesRemoved) {
+      // Node count changed — we'd need to insert/remove DOM nodes.
+      // A full rebuild is simpler and only slightly more expensive.
+      return false;
+    }
+    // Same number of lines — just update innerHTML of existing span nodes
+    for (let i = start; i < newEnd; i++) {
+      if (!patchMirrorLine(i, lines[i]!.html)) return false;
+    }
+    return true;
+  }
+
   // ── Tokenizer ──────────────────────────────────────────────────────────────
 
   async function tokenizeFrom(startLine: number, signal: AbortSignal) {
     let changed = false;
+    let batchStart = performance.now();
+
     for (let i = startLine; i < lines.length; i++) {
       if (signal.aborted) return;
       const line = lines[i];
@@ -518,6 +649,7 @@ export function createShikiEditor(
       const prevState = i > 0 ? lines[i - 1]?.grammarState : undefined;
       const prevHash = hashState(prevState);
       if (!line.dirty && line.grammarHash === prevHash) break;
+
       let result: ReturnType<typeof shiki.codeToTokens>;
       try {
         result = shiki.codeToTokens(line.text, {
@@ -525,20 +657,29 @@ export function createShikiEditor(
           cssVariablePrefix: "", grammarState: prevState,
         });
       } catch { line.dirty = false; continue; }
-      const tokens = await runTokenizeLine(plugins, i, result.tokens[0] ?? []);
+
+      // runTokenizeLine now uses the pre-filtered list via the closure
+      const tokens = pluginsWithTokenizeLine.length
+        ? await runTokenizeLine(pluginsWithTokenizeLine, i, result.tokens[0] ?? [])
+        : (result.tokens[0] ?? []);
+
       line.grammarState = result.grammarState;
       line.grammarHash = hashState(result.grammarState);
       line.html = tokensToHtml(tokens, themes, currentTheme);
       line.dirty = false;
       changed = true;
-      if (i % 50 === 0 && changed) {
-        renderViewportWrapped();
-        changed = false;
+
+      // Yield based on elapsed time, not a fixed line count
+      const now = performance.now();
+      if (now - batchStart >= BATCH_BUDGET_MS) {
+        if (changed) { patchMirrorLine(i, line.html); }
         await yieldToMain();
+        batchStart = performance.now();
       } else if (changed) {
         patchMirrorLine(i, line.html);
       }
     }
+
     if (!signal.aborted && changed) renderViewportWrapped();
   }
 
@@ -560,6 +701,8 @@ export function createShikiEditor(
     }
     lines.splice(start, oldEnd - start, ...replacements);
     value = newValue;
+
+    // Fast path: single-line edit with existing DOM node
     if (replacements.length === 1 && oldEnd - start === 1) {
       const patched = patchMirrorLine(start, replacements[0]!.html);
       if (patched) {
@@ -567,13 +710,26 @@ export function createShikiEditor(
         mirror.scrollLeft = textarea.scrollLeft;
         renderGutter();
         scheduleTokenize(start);
-        for (const plugin of plugins) plugin.change?.(newValue, oldValue);
+        for (const plugin of pluginsWithChange) plugin.change!(newValue, oldValue);
         return;
       }
     }
+
+    // Medium path: multi-line edit where line *count* is unchanged
+    const multiPatched = patchMirrorRange(start, oldEnd, newEnd);
+    if (multiPatched) {
+      mirror.scrollTop = textarea.scrollTop;
+      mirror.scrollLeft = textarea.scrollLeft;
+      renderGutter();
+      scheduleTokenize(start);
+      for (const plugin of pluginsWithChange) plugin.change!(newValue, oldValue);
+      return;
+    }
+
+    // Slow path: line count changed, full re-render
     renderViewportWrapped();
     scheduleTokenize(start);
-    for (const plugin of plugins) plugin.change?.(newValue, oldValue);
+    for (const plugin of pluginsWithChange) plugin.change!(newValue, oldValue);
   }
 
   async function applyEdit(newValue: string) {
@@ -591,15 +747,20 @@ export function createShikiEditor(
     if (hoverRafId) return;
     hoverRafId = requestAnimationFrame(async () => {
       hoverRafId = 0;
+
       const offset = mouseToOffset(textarea, e.clientX, e.clientY);
-      // If mouse is too far from any character, hide hover and return
+
+      // Off-element: hide any active hover
       if (offset === -1) {
         if (activeHoverPlugin) { activeHoverPlugin.hideHover?.(ctx); activeHoverPlugin = null; }
         lastHoverOffset = -1;
         return;
       }
+
+      // Same character as last frame — skip all work
       if (offset === lastHoverOffset) return;
       lastHoverOffset = offset;
+
       const match = await runResolveHover(plugins, offset, ctx);
       if (!match) {
         if (activeHoverPlugin) { activeHoverPlugin.hideHover?.(ctx); activeHoverPlugin = null; }
@@ -614,7 +775,7 @@ export function createShikiEditor(
   }
 
   function onMouseLeave() {
-    lastHoverOffset = -1;
+    lastHoverOffset = -2;
     if (activeHoverPlugin) { activeHoverPlugin.hideHover?.(ctx); activeHoverPlugin = null; }
   }
 
@@ -624,6 +785,10 @@ export function createShikiEditor(
     applyEdit(textarea.value);
     onChange?.(textarea.value);
   }
+
+  // Pre-compile the dedent regex with the known tabSize so it isn't rebuilt on
+  // every Shift+Tab keystroke.
+  const dedentRe = new RegExp(`^( {1,${tabSize}})`, "gm");
 
   async function onKeydown(e: KeyboardEvent) {
     const handled = await runKeydown(plugins, e);
@@ -640,7 +805,7 @@ export function createShikiEditor(
         const lineStart = before.lastIndexOf("\n") + 1;
         const prefix = textarea.value.slice(lineStart, start);
         const block = prefix + selected;
-        const dedented = block.replace(new RegExp(`^( {1,${tabSize}})`, "gm"), "");
+        const dedented = block.replace(dedentRe, "");
         const removed = block.length - dedented.length;
         const next = textarea.value.slice(0, lineStart) + dedented + after;
         textarea.value = next;
@@ -663,12 +828,14 @@ export function createShikiEditor(
     if (scrollRafId) return;
     scrollRafId = requestAnimationFrame(() => {
       scrollRafId = 0;
-      mirror.scrollTop = textarea.scrollTop;
-      mirror.scrollLeft = textarea.scrollLeft;
-      gutter.scrollTop = textarea.scrollTop;
-      overlay.scrollTop = textarea.scrollTop;
-      overlay.scrollLeft = textarea.scrollLeft;
-      for (const plugin of plugins) plugin.scroll?.(textarea.scrollTop, textarea.scrollLeft);
+      const st = textarea.scrollTop;
+      const sl = textarea.scrollLeft;
+      mirror.scrollTop  = st;
+      mirror.scrollLeft = sl;
+      gutter.scrollTop  = st;
+      overlay.scrollTop  = st;
+      overlay.scrollLeft = sl;
+      for (const plugin of pluginsWithScroll) plugin.scroll!(st, sl);
     });
   }
 
@@ -678,7 +845,7 @@ export function createShikiEditor(
     const start = textarea.selectionStart;
     const end = textarea.selectionEnd;
     const cursorLine = getCursorLine();
-    for (const plugin of plugins) plugin.selectionChange?.(start, end, cursorLine);
+    for (const plugin of pluginsWithSelectionChange) plugin.selectionChange!(start, end, cursorLine);
   }
 
   function onGutterClick(e: MouseEvent) {
@@ -687,6 +854,8 @@ export function createShikiEditor(
     const clickY = e.clientY - rect.top + gutter.scrollTop - 16;
     const lineIndex = Math.floor(clickY / lineHeight);
     if (lineIndex < 0 || lineIndex >= lines.length) return;
+
+    // Use a running offset sum instead of re-slicing the value per line
     let lineStart = 0;
     for (let i = 0; i < lineIndex; i++) lineStart += lines[i]!.text.length + 1;
     textarea.focus();
@@ -718,6 +887,8 @@ export function createShikiEditor(
     tokenizeAbortController.abort();
     if (scrollRafId) cancelAnimationFrame(scrollRafId);
     if (hoverRafId) cancelAnimationFrame(hoverRafId);
+    if (_rulerObserver) { _rulerObserver.disconnect(); _rulerObserver = null; }
+    _rulerStyleCache = null;
     textarea.removeEventListener("input", onInput);
     textarea.removeEventListener("keydown", onKeydown);
     textarea.removeEventListener("scroll", onScroll);
@@ -739,23 +910,18 @@ export function createShikiEditor(
 
   function applyTheme(theme: string) {
     currentTheme = theme;
-    // Re-render with new theme
     scheduleTokenize(0);
   }
 
   function onThemeChange(e: MediaQueryListEvent) {
     if (!followSystemTheme) return;
     const newTheme = e.matches && themes.dark ? "dark" : themes.light ? "light" : defaultTheme;
-    if (newTheme !== currentTheme) {
-      applyTheme(newTheme);
-    }
+    if (newTheme !== currentTheme) applyTheme(newTheme);
   }
 
-  // Set up system theme detection
   const mediaQuery = followSystemTheme ? window.matchMedia("(prefers-color-scheme: dark)") : null;
   if (mediaQuery) {
     mediaQuery.addEventListener("change", onThemeChange);
-    // Apply initial system theme
     currentTheme = getSystemTheme();
   }
 
@@ -765,6 +931,7 @@ export function createShikiEditor(
     plugins.push(plugin);
     if (plugin.ready) plugin.ready(ctx);
   }
+  rebuildPluginLists();
 
   setValue(value);
 

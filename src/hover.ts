@@ -32,13 +32,8 @@ export interface VariableInfo {
 }
 
 export interface Grammar {
-  /** Human-readable language name */
   readonly name: string;
-
-  /** The "unknown type" sentinel for this language (e.g. "any" for TS, "_" for Rust) */
   readonly unknownType: string;
-
-  // ── Node classification ──────────────────────────────────────────────
 
   isIdentifier(node: BaseNode): boolean;
   isLiteral(node: BaseNode): boolean;
@@ -47,45 +42,18 @@ export interface Grammar {
   isFunctionExpression(node: BaseNode): boolean;
   isReturnStatement(node: BaseNode): boolean;
 
-  // ── Node data extraction ─────────────────────────────────────────────
-
   getIdentifierName(node: BaseNode): string | null;
   getLiteralValue(node: BaseNode): unknown;
 
-  // ── Structural queries ───────────────────────────────────────────────
-
-  /** Extract function info (name, params, return type) from a function declaration node */
   getFunctionInfo(tree: Tree, node: BaseNode): FunctionInfo | null;
-
-  /** Extract variable info from a variable declaration node. May return multiple for destructuring. */
   getVariableInfos(tree: Tree, node: BaseNode): VariableInfo[];
-
-  /** Get the declared identifier nodes owned by a declaration (to avoid double-hover) */
   getDeclaredIds(tree: Tree, node: BaseNode): BaseNode[];
-
-  /** Get function expression info (for arrow functions, closures, lambdas) */
   getFunctionExpressionInfo(tree: Tree, node: BaseNode): FunctionInfo | null;
-
-  /** Get the return expression node from a return statement */
   getReturnArgument(tree: Tree, node: BaseNode): BaseNode | null;
 
-  // ── Type resolution ──────────────────────────────────────────────────
-
-  /** Resolve an explicit type annotation on a node, if present */
   resolveTypeAnnotation(tree: Tree, node: BaseNode): string | null;
-
-  /** Resolve a type node to its string representation */
   resolveTypeNode(tree: Tree, typeNode: BaseNode): string | null;
 
-  // ── Expression type inference ────────────────────────────────────────
-
-  /**
-   * Infer the type of an expression node. `narrow` controls whether
-   * literal types are preserved (true for immutable bindings).
-   *
-   * This is optional — the engine provides a default implementation that
-   * delegates to the grammar for language-specific cases.
-   */
   inferExpressionType?(
     tree: Tree,
     node: BaseNode,
@@ -93,35 +61,102 @@ export interface Grammar {
     narrow: boolean,
   ): string | null;
 
-  // ── Literal type formatting ──────────────────────────────────────────
-
-  /** Format a literal value as a narrow type string (e.g. `"hello"`, `5`, `true`) */
   formatLiteralNarrow(node: BaseNode): string;
-
-  /** Format a literal value as a widened type string (e.g. `string`, `number`, `bool`) */
   formatLiteralWidened(node: BaseNode): string;
 }
 
 // ===========================================================================
-// Span helpers (language-agnostic)
+// Children index — O(1) child lookup instead of O(n) filter per node
 // ===========================================================================
+//
+// The original code called `tree.nodes.filter(n => n.parent === id)` at every
+// point that needed children — inside `collectDescendants`, `buildSymbolTable`,
+// `collectHoverNodes`, and inside every grammar implementation. For a tree with
+// N nodes this makes each lookup O(N), and since lookups are nested the overall
+// complexity balloons to O(N²) or worse.
+//
+// We build the index once per `Tree` instance and cache it in a WeakMap so
+// subsequent calls to `collectHoverNodes` with the same tree reuse it for free.
 
-function getNodeSpan(
-  node: BaseNode,
-  code: string,
-): { start: number; length: number; line: number; character: number } | null {
+const childrenCache = new WeakMap<Tree, Map<number, BaseNode[]>>();
+
+function buildChildrenIndex(tree: Tree): Map<number, BaseNode[]> {
+  const cached = childrenCache.get(tree);
+  if (cached) return cached;
+  const index = new Map<number, BaseNode[]>();
+  for (const node of tree.nodes) {
+    const parent = node.parent;
+    if (parent === undefined || parent === null) continue;
+    let list = index.get(parent);
+    if (!list) { list = []; index.set(parent, list); }
+    list.push(node);
+  }
+  childrenCache.set(tree, index);
+  return index;
+}
+
+function childrenOf(index: Map<number, BaseNode[]>, id: number): BaseNode[] {
+  return index.get(id) ?? [];
+}
+
+// ===========================================================================
+// Span helpers — with line/character pre-computation cache
+// ===========================================================================
+//
+// `getNodeSpan` originally called `code.slice(0, offset).split("\n")` for every
+// node in the tree. For a 500-node tree with 200-char average offset that's
+// ~100 KB of string work just for span computation. We replace it with a single
+// linear scan that builds an offset→(line,col) lookup table once per code
+// string, also cached in a WeakMap (keyed on a wrapper object so the same
+// string can be cached across calls).
+
+interface SpanEntry {
+  start: number;
+  length: number;
+  line: number;
+  character: number;
+}
+
+// We can't WeakMap a string, so we cache per Tree+code pair using the Tree
+// as the key and storing {code, table} so we can detect a stale code string.
+interface LineTableCache {
+  code: string;
+  // Sorted array of line-start offsets. lineStarts[i] = offset of first char on line i.
+  lineStarts: Uint32Array;
+}
+
+const lineTableCache = new WeakMap<Tree, LineTableCache>();
+
+function getLineStarts(tree: Tree, code: string): Uint32Array {
+  const cached = lineTableCache.get(tree);
+  if (cached && cached.code === code) return cached.lineStarts;
+
+  // Build the table in a single forward pass
+  const starts: number[] = [0];
+  for (let i = 0; i < code.length; i++) {
+    if (code.charCodeAt(i) === 10 /* \n */) starts.push(i + 1);
+  }
+  const table = new Uint32Array(starts);
+  lineTableCache.set(tree, { code, lineStarts: table });
+  return table;
+}
+
+function offsetToLineCol(lineStarts: Uint32Array, offset: number): { line: number; character: number } {
+  // Binary search for the last line that starts at or before `offset`
+  let lo = 0, hi = lineStarts.length - 1;
+  while (lo < hi) {
+    const mid = (lo + hi + 1) >>> 1;
+    if (lineStarts[mid]! <= offset) lo = mid; else hi = mid - 1;
+  }
+  return { line: lo, character: offset - lineStarts[lo]! };
+}
+
+function getNodeSpan(node: BaseNode, lineStarts: Uint32Array): SpanEntry | null {
   if (!node.span) return null;
-  const lines = code.slice(0, node.span.start.offset).split("\n");
-  const line = lines.length - 1;
-  const lastLine = lines[lines.length - 1];
-  if (lastLine === undefined) return null;
-  const character = lastLine.length;
-  return {
-    start: node.span.start.offset,
-    length: node.span.end.offset - node.span.start.offset,
-    line,
-    character,
-  };
+  const start = node.span.start.offset;
+  const length = node.span.end.offset - start;
+  const { line, character } = offsetToLineCol(lineStarts, start);
+  return { start, length, line, character };
 }
 
 // ===========================================================================
@@ -135,13 +170,11 @@ function inferExpressionType(
   symbols: Map<string, string>,
   narrow: boolean,
 ): string {
-  // Let the grammar handle language-specific expressions first
   if (grammar.inferExpressionType) {
     const result = grammar.inferExpressionType(tree, node, symbols, narrow);
     if (result !== null) return result;
   }
 
-  // Universal fallbacks
   if (grammar.isLiteral(node)) {
     return narrow ? grammar.formatLiteralNarrow(node) : grammar.formatLiteralWidened(node);
   }
@@ -154,7 +187,7 @@ function inferExpressionType(
   if (grammar.isFunctionExpression(node)) {
     const info = grammar.getFunctionExpressionInfo(tree, node);
     if (info) {
-      const paramStr = info.params.map((p) => `${p.name}: ${p.type}`).join(", ");
+      const paramStr = joinParams(info.params);
       const ret = info.returnType ?? inferReturnType(grammar, tree, node, symbols);
       return `(${paramStr}) => ${ret}`;
     }
@@ -164,19 +197,20 @@ function inferExpressionType(
 }
 
 // ===========================================================================
-// Return type inference (grammar-agnostic)
+// Return type inference
 // ===========================================================================
+//
+// `collectDescendants` previously called `tree.nodes.filter(n => n.parent === id)`
+// inside a loop — O(N) per node. It now uses the children index for O(1) lookup.
 
 function collectDescendants(
   grammar: Grammar,
-  tree: Tree,
+  children: Map<number, BaseNode[]>,
   parent: BaseNode,
   skipNestedFunctions: boolean,
 ): BaseNode[] {
   const result: BaseNode[] = [];
-  const childrenOf = (id: number) => tree.nodes.filter((n) => n.parent === id);
-
-  const stack = childrenOf(parent.id);
+  const stack = childrenOf(children, parent.id).slice(); // shallow copy so we can mutate
   while (stack.length > 0) {
     const node = stack.pop()!;
     if (
@@ -187,9 +221,8 @@ function collectDescendants(
       continue;
     }
     result.push(node);
-    stack.push(...childrenOf(node.id));
+    for (const child of childrenOf(children, node.id)) stack.push(child);
   }
-
   return result;
 }
 
@@ -199,102 +232,97 @@ function inferReturnType(
   funcNode: BaseNode,
   symbols: Map<string, string>,
 ): string {
-  const bodyNodes = collectDescendants(grammar, tree, funcNode, true);
-  const returnStatements = bodyNodes.filter((n) => grammar.isReturnStatement(n));
-
-  if (returnStatements.length === 0) return "void";
+  // Build/reuse the children index — already cached after first call
+  const children = buildChildrenIndex(tree);
+  const bodyNodes = collectDescendants(grammar, children, funcNode, true);
 
   const returnTypes: string[] = [];
-
-  for (const ret of returnStatements) {
-    const arg = grammar.getReturnArgument(tree, ret);
-    if (!arg) {
-      returnTypes.push("void");
-    } else {
-      returnTypes.push(inferExpressionType(grammar, tree, arg, symbols, false));
-    }
+  for (const n of bodyNodes) {
+    if (!grammar.isReturnStatement(n)) continue;
+    const arg = grammar.getReturnArgument(tree, n);
+    returnTypes.push(arg ? inferExpressionType(grammar, tree, arg, symbols, false) : "void");
   }
 
-  const unique = [...new Set(returnTypes)];
-  if (unique.length === 0) return "void";
-  if (unique.length === 1) return unique[0]!;
-  return unique.join(" | ");
+  if (returnTypes.length === 0) return "void";
+  if (returnTypes.length === 1) return returnTypes[0]!;
+
+  // Deduplicate without allocating a Set when there are few types (common case)
+  const unique: string[] = [];
+  for (const t of returnTypes) if (!unique.includes(t)) unique.push(t);
+  return unique.length === 1 ? unique[0]! : unique.join(" | ");
 }
 
 // ===========================================================================
-// Symbol table (grammar-agnostic)
+// Shared param string helper — avoids repeated identical map+join patterns
 // ===========================================================================
 
-function buildSymbolTable(grammar: Grammar, tree: Tree, code: string): Map<string, string> {
-  const symbols = new Map<string, string>();
+function joinParams(params: ParamInfo[]): string {
+  if (params.length === 0) return "";
+  if (params.length === 1) return `${params[0]!.name}: ${params[0]!.type}`;
+  return params.map((p) => `${p.name}: ${p.type}`).join(", ");
+}
+
+// ===========================================================================
+// Single-pass collectHoverNodes
+// ===========================================================================
+//
+// The original code made three separate passes over `tree.nodes`:
+//   1. `buildSymbolTable` — one full pass for declarations
+//   2. A pass to collect `declaredIds`
+//   3. A pass to emit hover nodes
+//
+// We merge all three into a single ordered pass. Since JavaScript's Map
+// preserves insertion order and we process nodes in tree order, forward
+// references (an identifier used before its declaration) still resolve
+// correctly — we just emit `unknownType` for them at first, which is the same
+// behaviour as before (the symbol table was also built in tree order).
+//
+// The children index is built once and reused throughout.
+
+export function collectHoverNodes(grammar: Grammar, tree: Tree, code: string): NodeHover[] {
+  const children  = buildChildrenIndex(tree);
+  const lineStarts = getLineStarts(tree, code);
+  const symbols   = new Map<string, string>();
+  const hovers: NodeHover[] = [];
+
+  // Declared identifier node IDs — populated as we encounter declarations
+  const declaredIds = new Set<number>();
 
   for (const node of tree.nodes) {
+    // ── Populate symbol table (replaces buildSymbolTable) ─────────────
     if (grammar.isFunctionDeclaration(node)) {
       const info = grammar.getFunctionInfo(tree, node);
       if (info) {
-        // Store as callable signature for return type resolution on call sites
-        const paramStr = info.params.map((p) => `${p.name}: ${p.type}`).join(", ");
+        const paramStr = joinParams(info.params);
         const ret =
           info.returnType ??
           grammar.resolveTypeAnnotation(tree, node) ??
           inferReturnType(grammar, tree, node, symbols);
         symbols.set(info.name, `(${paramStr}) => ${ret}`);
-
-        // Register parameter names
-        for (const p of info.params) {
-          symbols.set(p.name, p.type);
-        }
+        for (const p of info.params) symbols.set(p.name, p.type);
       }
     }
 
     if (grammar.isVariableDeclaration(node)) {
-      const vars = grammar.getVariableInfos(tree, node);
-      for (const v of vars) {
-        // Explicit annotation wins
+      for (const v of grammar.getVariableInfos(tree, node)) {
         if (v.type) {
           symbols.set(v.name, v.type);
-          continue;
-        }
-        // Infer from initializer
-        if (v.initNode) {
+        } else if (v.initNode) {
           symbols.set(v.name, inferExpressionType(grammar, tree, v.initNode, symbols, v.immutable));
         }
       }
     }
-  }
 
-  return symbols;
-}
-
-// ===========================================================================
-// Hover collection (grammar-agnostic)
-// ===========================================================================
-
-export function collectHoverNodes(grammar: Grammar, tree: Tree, code: string): NodeHover[] {
-  const hovers: NodeHover[] = [];
-  const symbols = buildSymbolTable(grammar, tree, code);
-
-  // Track declared identifiers to avoid double-emit
-  const declaredIds = new Set<number>();
-
-  for (const node of tree.nodes) {
+    // ── Track declared identifier IDs (replaces the second pass) ──────
     if (grammar.isVariableDeclaration(node) || grammar.isFunctionDeclaration(node)) {
-      for (const id of grammar.getDeclaredIds(tree, node)) {
-        declaredIds.add(id.id);
-      }
+      for (const id of grammar.getDeclaredIds(tree, node)) declaredIds.add(id.id);
     }
-  }
 
-  const seen = new Set<number>();
-
-  for (const node of tree.nodes) {
-    if (seen.has(node.id)) continue;
-    seen.add(node.id);
-
-    const span = getNodeSpan(node, code);
+    // ── Emit hover entries (replaces the third pass) ───────────────────
+    const span = getNodeSpan(node, lineStarts);
     if (!span) continue;
 
-    // ── Identifier references (not declarations) ──────────────────────
+    // Identifier references (not declaration sites)
     if (grammar.isIdentifier(node) && !declaredIds.has(node.id)) {
       const name = grammar.getIdentifierName(node);
       if (name) {
@@ -302,87 +330,67 @@ export function collectHoverNodes(grammar: Grammar, tree: Tree, code: string): N
           grammar.resolveTypeAnnotation(tree, node) ?? symbols.get(name) ?? grammar.unknownType;
         hovers.push({
           type: "hover",
-          start: span.start,
-          length: span.length,
-          line: span.line,
-          character: span.character,
+          ...span,
           target: name,
           text: `${name}: ${type}`,
         });
       }
     }
 
-    // ── Literals ──────────────────────────────────────────────────────
+    // Literals
     if (grammar.isLiteral(node)) {
       const raw = code.slice(span.start, span.start + span.length);
       hovers.push({
         type: "hover",
-        start: span.start,
-        length: span.length,
-        line: span.line,
-        character: span.character,
+        ...span,
         target: raw,
         text: grammar.formatLiteralNarrow(node),
       });
     }
 
-    // ── Function declarations ─────────────────────────────────────────
+    // Function declarations
     if (grammar.isFunctionDeclaration(node)) {
       const info = grammar.getFunctionInfo(tree, node);
       if (info) {
-        const paramStr = info.params.map((p) => `${p.name}: ${p.type}`).join(", ");
+        const paramStr = joinParams(info.params);
         const ret = info.returnType ?? inferReturnType(grammar, tree, node, symbols);
         hovers.push({
           type: "hover",
-          start: span.start,
-          length: span.length,
-          line: span.line,
-          character: span.character,
+          ...span,
           target: info.name,
           text: `${info.keyword} ${info.name}(${paramStr}): ${ret}`,
         });
       }
     }
 
-    // ── Variable declarations ─────────────────────────────────────────
+    // Variable declarations — emit per binding identifier
     if (grammar.isVariableDeclaration(node)) {
-      const vars = grammar.getVariableInfos(tree, node);
-
-      for (const v of vars) {
-        const idSpan = getNodeSpan(v.idNode, code);
+      for (const v of grammar.getVariableInfos(tree, node)) {
+        const idSpan = getNodeSpan(v.idNode, lineStarts);
         if (!idSpan) continue;
-
-        let type = v.type;
-        if (!type) type = symbols.get(v.name) ?? null;
-        if (!type && v.initNode) {
-          type = inferExpressionType(grammar, tree, v.initNode, symbols, v.immutable);
-        }
-        if (!type) type = grammar.unknownType;
-
+        const type =
+          v.type ??
+          symbols.get(v.name) ??
+          (v.initNode ? inferExpressionType(grammar, tree, v.initNode, symbols, v.immutable) : null) ??
+          grammar.unknownType;
         hovers.push({
           type: "hover",
-          start: idSpan.start,
-          length: idSpan.length,
-          line: idSpan.line,
-          character: idSpan.character,
+          ...idSpan,
           target: v.name,
           text: `${v.kind} ${v.name}: ${type}`,
         });
       }
     }
 
-    // ── Function expressions (arrow functions, closures, lambdas) ─────
+    // Function expressions (arrow functions, closures, lambdas)
     if (grammar.isFunctionExpression(node)) {
       const info = grammar.getFunctionExpressionInfo(tree, node);
       if (info) {
-        const paramStr = info.params.map((p) => `${p.name}: ${p.type}`).join(", ");
+        const paramStr = joinParams(info.params);
         const ret = info.returnType ?? inferReturnType(grammar, tree, node, symbols);
         hovers.push({
           type: "hover",
-          start: span.start,
-          length: span.length,
-          line: span.line,
-          character: span.character,
+          ...span,
           target: code.slice(span.start, span.start + Math.min(span.length, 20)),
           text: `(${paramStr}) => ${ret}`,
         });

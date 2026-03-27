@@ -2,13 +2,10 @@ import type { ShikiEditorPlugin, HoverInfo, ShikiEditorContext } from "../editor
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
-/** A single node from the twoslash output. */
 export interface TwoslashNode {
   line: number;
   character: number;
-  /** Absolute character offset from the start of the source string. */
   start: number;
-  /** Length of the highlighted span in characters. */
   length: number;
   target: string;
   /** TypeScript hover text, e.g. "const greeting: string" */
@@ -21,203 +18,255 @@ export interface TwoslashData {
   nodes: TwoslashNode[];
 }
 
-/**
- * A function with the same signature as twoslash's generic function type.
- * Receives the current editor code and returns twoslash data.
- * May be sync or async.
- */
 export type Slasher = (code: string) => TwoslashData | Promise<TwoslashData>;
 
 export interface TwoslashPluginOptions {
-  /**
-   * The function used to produce twoslash data from source code.
-   * Called automatically on every `change` hook and once during `ready`
-   * with the editor's initial value.
-   * If omitted, you must call `plugin.update(data)` manually.
-   */
   slasher: Slasher;
-
-  /**
-   * Seed data used for the very first render, before the slasher has had a
-   * chance to run. If `slasher` is provided this is overwritten immediately
-   * in `ready()`, so you typically don't need to supply it.
-   */
+  /** Seed data for the very first render, before the slasher has run. */
   data?: TwoslashData;
+  /** Debounce delay in ms before invoking the slasher after a change. Default: 250. */
+  debounceMs?: number;
 }
 
 export interface TwoslashPluginHandle extends ShikiEditorPlugin {
-  /** Directly replace the active dataset (bypasses the slasher). */
   update(data: TwoslashData | null): void;
 }
 
 // ─── Hover node index ─────────────────────────────────────────────────────────
+//
+// We store sorted hover nodes in a flat typed array for compact memory and
+// cache-friendly binary search, alongside a parallel string array for text.
+// This avoids repeated object allocation on every index rebuild and makes
+// `findNode` faster by keeping numeric fields together.
 
-function buildIndex(nodes: TwoslashNode[]): TwoslashNode[] {
-  return nodes.filter((n) => n.type === "hover").sort((a, b) => a.start - b.start);
+interface HoverIndex {
+  // Parallel arrays — entry i spans [starts[i], starts[i] + lengths[i])
+  starts:  Int32Array;
+  lengths: Int32Array;
+  texts:   string[];
+  count:   number;
 }
 
-function findNode(index: TwoslashNode[], offset: number): TwoslashNode | null {
-  // Binary search for last node with start <= offset
-  let lo = 0,
-    hi = index.length - 1,
-    candidate = -1;
+const EMPTY_INDEX: HoverIndex = {
+  starts:  new Int32Array(0),
+  lengths: new Int32Array(0),
+  texts:   [],
+  count:   0,
+};
+
+function buildIndex(nodes: TwoslashNode[]): HoverIndex {
+  const hover = nodes.filter((n) => n.type === "hover");
+  if (hover.length === 0) return EMPTY_INDEX;
+
+  hover.sort((a, b) => a.start - b.start);
+
+  const count   = hover.length;
+  const starts  = new Int32Array(count);
+  const lengths = new Int32Array(count);
+  const texts: string[] = new Array(count);
+
+  for (let i = 0; i < count; i++) {
+    starts[i]  = hover[i]!.start;
+    lengths[i] = hover[i]!.length;
+    texts[i]   = hover[i]!.text;
+  }
+
+  return { starts, lengths, texts, count };
+}
+
+// Binary search: find the last entry whose start ≤ offset, then verify
+// containment. Walks back to handle overlapping spans (rare in practice).
+function findInIndex(idx: HoverIndex, offset: number): HoverInfo | null {
+  if (idx.count === 0) return null;
+
+  const { starts, lengths, texts, count } = idx;
+  let lo = 0, hi = count - 1, candidate = -1;
+
   while (lo <= hi) {
     const mid = (lo + hi) >>> 1;
-    if (index[mid]!.start <= offset) {
-      candidate = mid;
-      lo = mid + 1;
-    } else hi = mid - 1;
+    if (starts[mid]! <= offset) { candidate = mid; lo = mid + 1; }
+    else hi = mid - 1;
   }
+
   if (candidate === -1) return null;
 
-  // Walk back to handle overlapping spans
+  // Walk back over any overlapping spans
   for (let i = candidate; i >= 0; i--) {
-    const node = index[i]!;
-    if (node.start + node.length < offset) break;
-    if (node.start <= offset && offset < node.start + node.length) return node;
+    const s = starts[i]!;
+    const end = s + lengths[i]!;
+    if (end < offset) break; // sorted by start, so no earlier entry can contain offset
+    if (s <= offset && offset < end) {
+      return { start: s, length: lengths[i]!, text: texts[i]! };
+    }
   }
+
   return null;
 }
 
-// ─── Tooltip element matching the CSS data-tooltip styling ────────────────────
+// ─── Debounce ─────────────────────────────────────────────────────────────────
 //
-// This creates a tooltip that looks identical to the CSS [data-tooltip]:before
-// but can be positioned programmatically for code editor hover.
+// The original `change` hook fired the slasher on every keystroke with only a
+// sequence counter to discard stale results. The slasher (a full TypeScript
+// language-service run) is expensive — debouncing it prevents redundant work
+// while keeping the UI responsive. The sequence guard is kept so that even if
+// two debounced calls race (e.g. the user pauses, types again quickly), only
+// the latest result is applied.
+
+function makeDebounce(fn: (code: string) => void, ms: number) {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  function debounced(code: string) {
+    if (timer !== null) clearTimeout(timer);
+    timer = setTimeout(() => { timer = null; fn(code); }, ms);
+  }
+  debounced.flush = () => { if (timer !== null) { clearTimeout(timer); timer = null; } };
+  return debounced;
+}
+
+// ─── Tooltip ──────────────────────────────────────────────────────────────────
+//
+// Key changes vs. original:
+//
+// 1. `positionTooltip` now auto-flips the side when the preferred placement
+//    would overflow the viewport, so the tooltip never clips off-screen.
+//
+// 2. `showTooltip` / `hideTooltip` toggle a single CSS class (`is-visible`)
+//    instead of adding/removing three classes each time. This means only one
+//    `classList` mutation per show/hide, and the transition is driven entirely
+//    by CSS — matching the data-tooltip pattern more closely.
+//
+// 3. The tooltip element is created with a `<style>` tag injected once so the
+//    Tailwind class list stays minimal and predictable regardless of purge
+//    configuration.
+
+const TOOLTIP_STYLE_ID = "shedit-twoslash-style";
+
+function ensureTooltipStyle() {
+  if (document.getElementById(TOOLTIP_STYLE_ID)) return;
+  const style = document.createElement("style");
+  style.id = TOOLTIP_STYLE_ID;
+  // All transition state lives here — no runtime classList juggling beyond one toggle.
+  style.textContent = `
+    #shedit-twoslash-tooltip {
+      position: fixed;
+      z-index: 60;
+      max-width: 20rem;
+      width: fit-content;
+      border-radius: 0.375rem;
+      padding: 0.375rem 0.75rem;
+      font-size: 0.875rem;
+      line-height: 1.25rem;
+      pointer-events: none;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      background: #171717; /* neutral-900 */
+      color: #e5e5e5;      /* neutral-200 */
+      visibility: hidden;
+      opacity: 0;
+      transform: scale(0.95);
+      transition: opacity 150ms, transform 150ms, visibility 0s 150ms;
+    }
+    @media (prefers-color-scheme: dark) {
+      #shedit-twoslash-tooltip {
+        background: #f5f5f5; /* neutral-100 */
+        color: #262626;      /* neutral-800 */
+      }
+    }
+    #shedit-twoslash-tooltip.is-visible {
+      visibility: visible;
+      opacity: 1;
+      transform: scale(1);
+      transition: opacity 150ms, transform 150ms;
+    }
+  `.trim();
+  document.head.appendChild(style);
+}
 
 function createTooltipElement(): HTMLDivElement {
+  ensureTooltipStyle();
   const tooltip = document.createElement("div");
   tooltip.id = "shedit-twoslash-tooltip";
-
-  // Use Tailwind colors:
-  // bg-neutral-900 in light mode, bg-neutral-100 in dark mode
-  // text-neutral-100 in light mode, text-neutral-900 in dark mode
-  tooltip.className = `
-    fixed z-[60] truncate max-w-xs w-fit rounded-md px-3 py-1.5 text-sm
-    bg-neutral-900 text-neutral-200
-    dark:bg-neutral-100 dark:text-neutral-800
-    pointer-events-none
-    invisible opacity-0 scale-95 transition-all duration-150
-  `.replace(/\s+/g, " ").trim();
-
   return tooltip;
+}
+
+// Auto-flip: prefer `preferredSide`, flip to opposite if it would overflow.
+function computeSide(
+  tooltipRect: DOMRect,
+  anchorRect: DOMRect,
+  margin: number,
+  preferredSide: "top" | "bottom",
+): "top" | "bottom" {
+  if (preferredSide === "top") {
+    return anchorRect.top - tooltipRect.height - margin >= 0 ? "top" : "bottom";
+  }
+  return anchorRect.bottom + tooltipRect.height + margin <= window.innerHeight ? "bottom" : "top";
 }
 
 function positionTooltip(
   tooltip: HTMLDivElement,
   anchorRect: DOMRect,
-  side: "top" | "bottom" | "left" | "right" = "top",
-  align: "start" | "center" | "end" = "start"
+  preferredSide: "top" | "bottom" = "top",
+  align: "start" | "center" | "end" = "start",
 ) {
+  // getBoundingClientRect() requires the element to be in the DOM and
+  // non-hidden (visibility:hidden still contributes to layout — fine here).
   const tooltipRect = tooltip.getBoundingClientRect();
-  const margin = 6; // matches before:mb-1.5, before:mt-1.5 (1.5 * 4px = 6px)
-
-  let top = 0;
-  let left = 0;
-
-  // Calculate position based on side (matching CSS logic)
-  switch (side) {
-    case "top":
-      // @apply before:bottom-full before:mb-1.5 before:translate-y-2 hover:before:translate-y-0;
-      top = anchorRect.top - tooltipRect.height - margin;
-      break;
-    case "bottom":
-      // @apply before:top-full before:mt-1.5 before:-translate-y-2 hover:before:translate-y-0;
-      top = anchorRect.bottom + margin;
-      break;
-    case "left":
-      // @apply before:right-full before:mr-1.5 before:translate-x-2 hover:before:translate-x-0;
-      left = anchorRect.left - tooltipRect.width - margin;
-      break;
-    case "right":
-      // @apply before:left-full before:ml-1.5 before:-translate-x-2 hover:before:translate-x-0;
-      left = anchorRect.right + margin;
-      break;
-  }
-
-  // Calculate position based on alignment for top/bottom
-  // CSS: &[data-align='start'] { @apply before:left-0; }
-  // CSS: &[data-align='end'] { @apply before:right-0; }
-  // CSS: &[data-align='center'] { @apply before:left-1/2 before:-translate-x-1/2; }
-  if (side === "top" || side === "bottom") {
-    switch (align) {
-      case "start":
-        left = anchorRect.left;
-        break;
-      case "end":
-        left = anchorRect.right - tooltipRect.width;
-        break;
-      case "center":
-        left = anchorRect.left + anchorRect.width / 2 - tooltipRect.width / 2;
-        break;
-    }
-  }
-
-  // Calculate position based on alignment for left/right
-  // CSS: &[data-align='start'] { @apply before:top-0; }
-  // CSS: &[data-align='end'] { @apply before:bottom-0; }
-  // CSS: &[data-align='center'] { @apply before:top-1/2 before:-translate-y-1/2; }
-  if (side === "left" || side === "right") {
-    switch (align) {
-      case "start":
-        top = anchorRect.top;
-        break;
-      case "end":
-        top = anchorRect.bottom - tooltipRect.height;
-        break;
-      case "center":
-        top = anchorRect.top + anchorRect.height / 2 - tooltipRect.height / 2;
-        break;
-    }
-  }
-
-  // Keep within viewport
+  const margin = 6;
   const padding = 8;
-  top = Math.max(padding, Math.min(top, window.innerHeight - tooltipRect.height - padding));
-  left = Math.max(padding, Math.min(left, window.innerWidth - tooltipRect.width - padding));
 
-  tooltip.style.top = `${top}px`;
-  tooltip.style.left = `${left}px`;
+  const side = computeSide(tooltipRect, anchorRect, margin, preferredSide);
+  const top = side === "top"
+    ? anchorRect.top - tooltipRect.height - margin
+    : anchorRect.bottom + margin;
+
+  let left: number;
+  switch (align) {
+    case "start":  left = anchorRect.left; break;
+    case "end":    left = anchorRect.right - tooltipRect.width; break;
+    case "center": left = anchorRect.left + anchorRect.width / 2 - tooltipRect.width / 2; break;
+  }
+
+  tooltip.style.top  = `${Math.max(padding, Math.min(top,  window.innerHeight - tooltipRect.height - padding))}px`;
+  tooltip.style.left = `${Math.max(padding, Math.min(left!, window.innerWidth  - tooltipRect.width  - padding))}px`;
 }
 
 function showTooltip(tooltip: HTMLDivElement) {
-  // Match CSS hover state: @apply visible opacity-100 scale-100;
-  tooltip.classList.remove("invisible", "opacity-0", "scale-95");
-  tooltip.classList.add("visible", "opacity-100", "scale-100");
+  tooltip.classList.add("is-visible");
 }
 
 function hideTooltip(tooltip: HTMLDivElement) {
-  // Match CSS non-hover state: @apply invisible opacity-0 scale-95;
-  tooltip.classList.add("invisible", "opacity-0", "scale-95");
-  tooltip.classList.remove("visible", "opacity-100", "scale-100");
+  tooltip.classList.remove("is-visible");
 }
 
 // ─── Plugin factory ───────────────────────────────────────────────────────────
 
 export function twoslashHoverPlugin(options: TwoslashPluginOptions): TwoslashPluginHandle {
-  const { slasher } = options;
+  const { slasher, debounceMs = 250 } = options;
 
-  let hoverIndex: TwoslashNode[] = options.data ? buildIndex(options.data.nodes) : [];
+  let hoverIndex: HoverIndex = options.data ? buildIndex(options.data.nodes) : EMPTY_INDEX;
   let tooltipEl: HTMLDivElement | null = null;
   let showTimeoutId: ReturnType<typeof setTimeout> | null = null;
-  // Guard against a slow slasher run overtaking a newer one
   let slasherSeq = 0;
 
   // ── Slasher runner ───────────────────────────────────────────────────────
 
   async function runSlasher(code: string): Promise<void> {
-    if (!slasher) return;
     const seq = ++slasherSeq;
     try {
       const result = await slasher(code);
-      // Discard if a newer run has already started
       if (seq !== slasherSeq) return;
       hoverIndex = buildIndex(result.nodes);
     } catch (err) {
-      if (seq === slasherSeq) {
-        console.error("[twoslash-hover] slasher error:", err);
-      }
+      if (seq === slasherSeq) console.error("[twoslash-hover] slasher error:", err);
     }
   }
+
+  // Debounced wrapper — invalidates the current index immediately so stale
+  // hovers don't linger while the new slasher run is in flight.
+  const debouncedSlasher = makeDebounce((code: string) => {
+    hoverIndex = EMPTY_INDEX; // clear stale data immediately
+    runSlasher(code);
+  }, debounceMs);
 
   // ── Tooltip helpers ──────────────────────────────────────────────────────
 
@@ -229,55 +278,51 @@ export function twoslashHoverPlugin(options: TwoslashPluginOptions): TwoslashPlu
     return tooltipEl;
   }
 
+  function clearShowTimeout() {
+    if (showTimeoutId !== null) {
+      clearTimeout(showTimeoutId);
+      showTimeoutId = null;
+    }
+  }
+
   // ── Plugin object ────────────────────────────────────────────────────────
 
   return {
     name: "twoslash-hover",
 
     async ready(ctx) {
-      // Run the slasher once with the editor's initial value so the first
-      // render already has hover data — no manual wiring needed in the app.
       const initial = ctx.getValue();
       if (initial) await runSlasher(initial);
     },
 
-    async change(newValue) {
-      // Re-run on every edit. The seq guard ensures only the latest wins.
-      await runSlasher(newValue);
+    change(newValue) {
+      // Debounce: don't run the expensive slasher on every keystroke.
+      debouncedSlasher(newValue);
     },
 
     dispose() {
-      if (showTimeoutId) {
-        clearTimeout(showTimeoutId);
-        showTimeoutId = null;
-      }
+      clearShowTimeout();
+      debouncedSlasher.flush();
       tooltipEl?.remove();
       tooltipEl = null;
     },
 
+    // Sync — no async overhead on the hot mouse-move path.
     resolveHover(offset) {
-      const node = findNode(hoverIndex, offset);
-      if (!node) return null;
-      return { start: node.start, length: node.length, text: node.text };
+      return findInIndex(hoverIndex, offset);
     },
 
-    showHover(info: HoverInfo, rect: DOMRect, ctx: ShikiEditorContext) {
-      // Clear any pending show timeout
-      if (showTimeoutId) {
-        clearTimeout(showTimeoutId);
-        showTimeoutId = null;
-      }
-
+    showHover(info: HoverInfo, rect: DOMRect, _ctx: ShikiEditorContext) {
+      clearShowTimeout();
       const tip = getTooltip();
-      tip.textContent = info.text;
 
-      // Reset to hidden state for transition
+      // Only update textContent when it actually changes to avoid unnecessary
+      // layout invalidation on repeated hovers over the same token.
+      if (tip.textContent !== info.text) tip.textContent = info.text;
+
       hideTooltip(tip);
-
-      // Position the tooltip
       positionTooltip(tip, rect, "top", "start");
 
-      // Delay showing the tooltip by 300ms
       showTimeoutId = setTimeout(() => {
         showTimeoutId = null;
         showTooltip(tip);
@@ -285,19 +330,13 @@ export function twoslashHoverPlugin(options: TwoslashPluginOptions): TwoslashPlu
     },
 
     hideHover() {
-      // Clear any pending show timeout
-      if (showTimeoutId) {
-        clearTimeout(showTimeoutId);
-        showTimeoutId = null;
-      }
-      if (tooltipEl) {
-        hideTooltip(tooltipEl);
-      }
+      clearShowTimeout();
+      if (tooltipEl) hideTooltip(tooltipEl);
     },
 
-    // Public handle method — hot-swap data without the slasher
     update(data: TwoslashData | null) {
-      hoverIndex = data ? buildIndex(data.nodes) : [];
+      debouncedSlasher.flush();
+      hoverIndex = data ? buildIndex(data.nodes) : EMPTY_INDEX;
     },
   };
 }
