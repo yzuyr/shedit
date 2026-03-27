@@ -1,7 +1,6 @@
 import { createHighlighter } from "shiki";
-import { createShikiEditor } from "../src";
+import { createShikiEditor, collectHoverNodes, grammars } from "../src";
 import { parse as parseTypeScript } from "@sylphx/synth-js";
-import { collectHoverNodes, grammars } from "../src";
 import { twoslashHoverPlugin, type TwoslashData } from "../src/plugins/twoslash-hover";
 
 // ---------------------------------------------------------------------------

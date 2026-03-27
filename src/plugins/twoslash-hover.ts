@@ -41,17 +41,17 @@ export interface TwoslashPluginHandle extends ShikiEditorPlugin {
 
 interface HoverIndex {
   // Parallel arrays — entry i spans [starts[i], starts[i] + lengths[i])
-  starts:  Int32Array;
+  starts: Int32Array;
   lengths: Int32Array;
-  texts:   string[];
-  count:   number;
+  texts: string[];
+  count: number;
 }
 
 const EMPTY_INDEX: HoverIndex = {
-  starts:  new Int32Array(0),
+  starts: new Int32Array(0),
   lengths: new Int32Array(0),
-  texts:   [],
-  count:   0,
+  texts: [],
+  count: 0,
 };
 
 function buildIndex(nodes: TwoslashNode[]): HoverIndex {
@@ -60,15 +60,15 @@ function buildIndex(nodes: TwoslashNode[]): HoverIndex {
 
   hover.sort((a, b) => a.start - b.start);
 
-  const count   = hover.length;
-  const starts  = new Int32Array(count);
+  const count = hover.length;
+  const starts = new Int32Array(count);
   const lengths = new Int32Array(count);
   const texts: string[] = new Array(count);
 
   for (let i = 0; i < count; i++) {
-    starts[i]  = hover[i]!.start;
+    starts[i] = hover[i]!.start;
     lengths[i] = hover[i]!.length;
-    texts[i]   = hover[i]!.text;
+    texts[i] = hover[i]!.text;
   }
 
   return { starts, lengths, texts, count };
@@ -80,12 +80,16 @@ function findInIndex(idx: HoverIndex, offset: number): HoverInfo | null {
   if (idx.count === 0) return null;
 
   const { starts, lengths, texts, count } = idx;
-  let lo = 0, hi = count - 1, candidate = -1;
+  let lo = 0,
+    hi = count - 1,
+    candidate = -1;
 
   while (lo <= hi) {
     const mid = (lo + hi) >>> 1;
-    if (starts[mid]! <= offset) { candidate = mid; lo = mid + 1; }
-    else hi = mid - 1;
+    if (starts[mid]! <= offset) {
+      candidate = mid;
+      lo = mid + 1;
+    } else hi = mid - 1;
   }
 
   if (candidate === -1) return null;
@@ -116,9 +120,17 @@ function makeDebounce(fn: (code: string) => void, ms: number) {
   let timer: ReturnType<typeof setTimeout> | null = null;
   function debounced(code: string) {
     if (timer !== null) clearTimeout(timer);
-    timer = setTimeout(() => { timer = null; fn(code); }, ms);
+    timer = setTimeout(() => {
+      timer = null;
+      fn(code);
+    }, ms);
   }
-  debounced.flush = () => { if (timer !== null) { clearTimeout(timer); timer = null; } };
+  debounced.flush = () => {
+    if (timer !== null) {
+      clearTimeout(timer);
+      timer = null;
+    }
+  };
   return debounced;
 }
 
@@ -215,19 +227,24 @@ function positionTooltip(
   const padding = 8;
 
   const side = computeSide(tooltipRect, anchorRect, margin, preferredSide);
-  const top = side === "top"
-    ? anchorRect.top - tooltipRect.height - margin
-    : anchorRect.bottom + margin;
+  const top =
+    side === "top" ? anchorRect.top - tooltipRect.height - margin : anchorRect.bottom + margin;
 
   let left: number;
   switch (align) {
-    case "start":  left = anchorRect.left; break;
-    case "end":    left = anchorRect.right - tooltipRect.width; break;
-    case "center": left = anchorRect.left + anchorRect.width / 2 - tooltipRect.width / 2; break;
+    case "start":
+      left = anchorRect.left;
+      break;
+    case "end":
+      left = anchorRect.right - tooltipRect.width;
+      break;
+    case "center":
+      left = anchorRect.left + anchorRect.width / 2 - tooltipRect.width / 2;
+      break;
   }
 
-  tooltip.style.top  = `${Math.max(padding, Math.min(top,  window.innerHeight - tooltipRect.height - padding))}px`;
-  tooltip.style.left = `${Math.max(padding, Math.min(left!, window.innerWidth  - tooltipRect.width  - padding))}px`;
+  tooltip.style.top = `${Math.max(padding, Math.min(top, window.innerHeight - tooltipRect.height - padding))}px`;
+  tooltip.style.left = `${Math.max(padding, Math.min(left!, window.innerWidth - tooltipRect.width - padding))}px`;
 }
 
 function showTooltip(tooltip: HTMLDivElement) {

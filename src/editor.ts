@@ -89,9 +89,10 @@ function buildShell(opts: {
 
   const noScrollbar = `<style>.${uid}-ns::-webkit-scrollbar{display:none}.${uid}-ns{scrollbar-width:none}</style>`;
 
-  const gutter = lineNumber !== false
-    ? `<div id="shedit-gutter" style="width:${gutterWidth}px" class="absolute top-0 left-0 bottom-0 pt-4 pr-2 overflow-hidden box-border text-right font-[inherit] text-[inherit] leading-[inherit] opacity-50 select-none cursor-pointer [z-index:3] [contain:content] text-neutral-800 dark:text-neutral-200"></div>`
-    : `<div id="shedit-gutter" class="hidden"></div>`;
+  const gutter =
+    lineNumber !== false
+      ? `<div id="shedit-gutter" style="width:${gutterWidth}px" class="absolute top-0 left-0 bottom-0 pt-4 pr-2 overflow-hidden box-border text-right font-[inherit] text-[inherit] leading-[inherit] opacity-50 select-none cursor-pointer [z-index:3] [contain:content] text-neutral-800 dark:text-neutral-200"></div>`
+      : `<div id="shedit-gutter" class="hidden"></div>`;
 
   const mirror = `<pre id="shedit-mirror" class="${uid}-ns absolute top-0 bottom-0 right-0 m-0 p-4 border-0 pointer-events-none select-none whitespace-pre-wrap break-words overflow-auto box-border font-[inherit] text-[inherit] leading-[inherit] [contain:strict] z-[0]" style="left:${gutterWidth}px"></pre>`;
 
@@ -195,7 +196,9 @@ function syncRulerStyles(ruler: HTMLDivElement, textarea: HTMLTextAreaElement) {
   // Re-read styles if textarea changed or cache was invalidated by ResizeObserver
   if (_rulerStyleCache?.textarea !== textarea) {
     if (_rulerObserver) _rulerObserver.disconnect();
-    _rulerObserver = new ResizeObserver(() => { _rulerStyleCache = null; });
+    _rulerObserver = new ResizeObserver(() => {
+      _rulerStyleCache = null;
+    });
     _rulerObserver.observe(textarea);
     _rulerStyleCache = null;
   }
@@ -309,7 +312,10 @@ function mouseToOffset(textarea: HTMLTextAreaElement, clientX: number, clientY: 
     const span = ruler.querySelector<HTMLSpanElement>("#__m2o__");
     if (!span) return;
     const dist = Math.hypot(rx - span.offsetLeft, ry - span.offsetTop);
-    if (dist < bestDist) { bestDist = dist; best = i; }
+    if (dist < bestDist) {
+      bestDist = dist;
+      best = i;
+    }
   }
 
   for (let i = 0; i <= text.length; i += step) probe(i);
@@ -409,10 +415,10 @@ function diffLines(oldLines: LineRecord[], newLines: string[]): [number, number,
   while (start < oldLen && start < newLen && oldLines[start]!.text === newLines[start]) start++;
   let oldEnd = oldLen;
   let newEnd = newLen;
-  while (
-    oldEnd > start && newEnd > start &&
-    oldLines[oldEnd - 1]!.text === newLines[newEnd - 1]
-  ) { oldEnd--; newEnd--; }
+  while (oldEnd > start && newEnd > start && oldLines[oldEnd - 1]!.text === newLines[newEnd - 1]) {
+    oldEnd--;
+    newEnd--;
+  }
   return [start, oldEnd, newEnd];
 }
 
@@ -428,8 +434,14 @@ function tokensToHtml(
   for (const token of tokens) {
     const escaped = escapeHtml(token.content);
     const style = token.htmlStyle;
-    if (!style) { html += escaped; continue; }
-    if (typeof style === "string") { html += `<span style="${style}">${escaped}</span>`; continue; }
+    if (!style) {
+      html += escaped;
+      continue;
+    }
+    if (typeof style === "string") {
+      html += `<span style="${style}">${escaped}</span>`;
+      continue;
+    }
     const styles: string[] = [];
     for (const theme in style) {
       const color = (style as Record<string, string>)[theme];
@@ -449,7 +461,9 @@ export function createShikiEditor(
   options: ShikiEditorOptions,
 ): ShikiEditorHandle {
   const {
-    shiki, lang, themes,
+    shiki,
+    lang,
+    themes,
     defaultTheme = Object.keys(themes)[0]!,
     followSystemTheme = true,
     lineHeight = 22,
@@ -476,20 +490,20 @@ export function createShikiEditor(
   // arrays. This eliminates the property-existence check from every hot path.
 
   const plugins: ShikiEditorPlugin[] = [];
-  let pluginsWithChange:          ShikiEditorPlugin[] = [];
-  let pluginsWithBeforeRender:    ShikiEditorPlugin[] = [];
-  let pluginsWithAfterRender:     ShikiEditorPlugin[] = [];
-  let pluginsWithScroll:          ShikiEditorPlugin[] = [];
+  let pluginsWithChange: ShikiEditorPlugin[] = [];
+  let pluginsWithBeforeRender: ShikiEditorPlugin[] = [];
+  let pluginsWithAfterRender: ShikiEditorPlugin[] = [];
+  let pluginsWithScroll: ShikiEditorPlugin[] = [];
   let pluginsWithSelectionChange: ShikiEditorPlugin[] = [];
-  let pluginsWithTokenizeLine:    ShikiEditorPlugin[] = [];
+  let pluginsWithTokenizeLine: ShikiEditorPlugin[] = [];
 
   function rebuildPluginLists() {
-    pluginsWithChange          = plugins.filter((p) => p.change);
-    pluginsWithBeforeRender    = plugins.filter((p) => p.beforeRender);
-    pluginsWithAfterRender     = plugins.filter((p) => p.afterRender);
-    pluginsWithScroll          = plugins.filter((p) => p.scroll);
+    pluginsWithChange = plugins.filter((p) => p.change);
+    pluginsWithBeforeRender = plugins.filter((p) => p.beforeRender);
+    pluginsWithAfterRender = plugins.filter((p) => p.afterRender);
+    pluginsWithScroll = plugins.filter((p) => p.scroll);
     pluginsWithSelectionChange = plugins.filter((p) => p.selectionChange);
-    pluginsWithTokenizeLine    = plugins.filter((p) => p.tokenizeLine);
+    pluginsWithTokenizeLine = plugins.filter((p) => p.tokenizeLine);
   }
 
   // ── DOM shell ──────────────────────────────────────────────────────────────
@@ -504,17 +518,21 @@ export function createShikiEditor(
 
   container.innerHTML = buildShell({ uid, gutterWidth, lineHeight, tabSize, lineNumber });
 
-  const mirror   = container.querySelector<HTMLPreElement>("#shedit-mirror")!;
-  const overlay  = container.querySelector<HTMLDivElement>("#shedit-overlay")!;
+  const mirror = container.querySelector<HTMLPreElement>("#shedit-mirror")!;
+  const overlay = container.querySelector<HTMLDivElement>("#shedit-overlay")!;
   const textarea = container.querySelector<HTMLTextAreaElement>("#shedit-textarea")!;
-  const gutter   = container.querySelector<HTMLDivElement>("#shedit-gutter")!;
+  const gutter = container.querySelector<HTMLDivElement>("#shedit-gutter")!;
 
   // ── Context ────────────────────────────────────────────────────────────────
 
   const ctx: ShikiEditorContext = {
     getValue: () => value,
     setValue: (v) => setValue(v),
-    textarea, mirror, gutter, overlay, container,
+    textarea,
+    mirror,
+    gutter,
+    overlay,
+    container,
   };
 
   // ── Plugin registration ────────────────────────────────────────────────────
@@ -550,7 +568,10 @@ export function createShikiEditor(
 
     if (lineNumber === "absolute") {
       // Absolute numbers are stable — only rebuild when lines are added/removed
-      if (!countChanged) { lastCursorLine = cursorLine; return; }
+      if (!countChanged) {
+        lastCursorLine = cursorLine;
+        return;
+      }
       let html = "";
       for (let i = 0; i < lines.length; i++) {
         html += `<div class="dark:text-neutral-200 text-neutral-800" style="height:${lineHeight}px;line-height:${lineHeight}px">${i + 1}</div>`;
@@ -622,7 +643,7 @@ export function createShikiEditor(
   // re-render only when the line count changes (nodes are added or removed).
 
   function patchMirrorRange(start: number, oldEnd: number, newEnd: number): boolean {
-    const linesAdded   = newEnd - start;
+    const linesAdded = newEnd - start;
     const linesRemoved = oldEnd - start;
     if (linesAdded !== linesRemoved) {
       // Node count changed — we'd need to insert/remove DOM nodes.
@@ -653,10 +674,16 @@ export function createShikiEditor(
       let result: ReturnType<typeof shiki.codeToTokens>;
       try {
         result = shiki.codeToTokens(line.text, {
-          lang, themes, defaultColor: false,
-          cssVariablePrefix: "", grammarState: prevState,
+          lang,
+          themes,
+          defaultColor: false,
+          cssVariablePrefix: "",
+          grammarState: prevState,
         });
-      } catch { line.dirty = false; continue; }
+      } catch {
+        line.dirty = false;
+        continue;
+      }
 
       // runTokenizeLine now uses the pre-filtered list via the closure
       const tokens = pluginsWithTokenizeLine.length
@@ -672,7 +699,9 @@ export function createShikiEditor(
       // Yield based on elapsed time, not a fixed line count
       const now = performance.now();
       if (now - batchStart >= BATCH_BUDGET_MS) {
-        if (changed) { patchMirrorLine(i, line.html); }
+        if (changed) {
+          patchMirrorLine(i, line.html);
+        }
         await yieldToMain();
         batchStart = performance.now();
       } else if (changed) {
@@ -697,7 +726,13 @@ export function createShikiEditor(
     const replacements: LineRecord[] = [];
     for (let i = start; i < newEnd; i++) {
       const text = newLineTexts[i]!;
-      replacements.push({ text, html: escapeHtml(text) + "\n", grammarState: undefined, grammarHash: "", dirty: true });
+      replacements.push({
+        text,
+        html: escapeHtml(text) + "\n",
+        grammarState: undefined,
+        grammarHash: "",
+        dirty: true,
+      });
     }
     lines.splice(start, oldEnd - start, ...replacements);
     value = newValue;
@@ -736,7 +771,10 @@ export function createShikiEditor(
     const oldValue = value;
     if (newValue === oldValue) return;
     const transformed = await runBeforeChange(plugins, newValue, oldValue);
-    if (transformed === null) { textarea.value = oldValue; return; }
+    if (transformed === null) {
+      textarea.value = oldValue;
+      return;
+    }
     if (transformed !== newValue) textarea.value = transformed;
     commitEdit(transformed, oldValue);
   }
@@ -752,7 +790,10 @@ export function createShikiEditor(
 
       // Off-element: hide any active hover
       if (offset === -1) {
-        if (activeHoverPlugin) { activeHoverPlugin.hideHover?.(ctx); activeHoverPlugin = null; }
+        if (activeHoverPlugin) {
+          activeHoverPlugin.hideHover?.(ctx);
+          activeHoverPlugin = null;
+        }
         lastHoverOffset = -1;
         return;
       }
@@ -763,11 +804,15 @@ export function createShikiEditor(
 
       const match = await runResolveHover(plugins, offset, ctx);
       if (!match) {
-        if (activeHoverPlugin) { activeHoverPlugin.hideHover?.(ctx); activeHoverPlugin = null; }
+        if (activeHoverPlugin) {
+          activeHoverPlugin.hideHover?.(ctx);
+          activeHoverPlugin = null;
+        }
         return;
       }
       const [winningPlugin, info] = match;
-      if (activeHoverPlugin && activeHoverPlugin !== winningPlugin) activeHoverPlugin.hideHover?.(ctx);
+      if (activeHoverPlugin && activeHoverPlugin !== winningPlugin)
+        activeHoverPlugin.hideHover?.(ctx);
       activeHoverPlugin = winningPlugin;
       const rect = getCharacterRect(textarea, info.start, info.length);
       winningPlugin.showHover?.(info, rect, ctx);
@@ -776,7 +821,10 @@ export function createShikiEditor(
 
   function onMouseLeave() {
     lastHoverOffset = -2;
-    if (activeHoverPlugin) { activeHoverPlugin.hideHover?.(ctx); activeHoverPlugin = null; }
+    if (activeHoverPlugin) {
+      activeHoverPlugin.hideHover?.(ctx);
+      activeHoverPlugin = null;
+    }
   }
 
   // ── Events ─────────────────────────────────────────────────────────────────
@@ -830,10 +878,10 @@ export function createShikiEditor(
       scrollRafId = 0;
       const st = textarea.scrollTop;
       const sl = textarea.scrollLeft;
-      mirror.scrollTop  = st;
+      mirror.scrollTop = st;
       mirror.scrollLeft = sl;
-      gutter.scrollTop  = st;
-      overlay.scrollTop  = st;
+      gutter.scrollTop = st;
+      overlay.scrollTop = st;
       overlay.scrollLeft = sl;
       for (const plugin of pluginsWithScroll) plugin.scroll!(st, sl);
     });
@@ -845,7 +893,8 @@ export function createShikiEditor(
     const start = textarea.selectionStart;
     const end = textarea.selectionEnd;
     const cursorLine = getCursorLine();
-    for (const plugin of pluginsWithSelectionChange) plugin.selectionChange!(start, end, cursorLine);
+    for (const plugin of pluginsWithSelectionChange)
+      plugin.selectionChange!(start, end, cursorLine);
   }
 
   function onGutterClick(e: MouseEvent) {
@@ -879,7 +928,9 @@ export function createShikiEditor(
     commitEdit(newValue, value);
   }
 
-  function getValue(): string { return value; }
+  function getValue(): string {
+    return value;
+  }
 
   function dispose() {
     if (disposed) return;
@@ -887,7 +938,10 @@ export function createShikiEditor(
     tokenizeAbortController.abort();
     if (scrollRafId) cancelAnimationFrame(scrollRafId);
     if (hoverRafId) cancelAnimationFrame(hoverRafId);
-    if (_rulerObserver) { _rulerObserver.disconnect(); _rulerObserver = null; }
+    if (_rulerObserver) {
+      _rulerObserver.disconnect();
+      _rulerObserver = null;
+    }
     _rulerStyleCache = null;
     textarea.removeEventListener("input", onInput);
     textarea.removeEventListener("keydown", onKeydown);

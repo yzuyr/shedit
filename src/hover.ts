@@ -88,7 +88,10 @@ function buildChildrenIndex(tree: Tree): Map<number, BaseNode[]> {
     const parent = node.parent;
     if (parent === undefined || parent === null) continue;
     let list = index.get(parent);
-    if (!list) { list = []; index.set(parent, list); }
+    if (!list) {
+      list = [];
+      index.set(parent, list);
+    }
     list.push(node);
   }
   childrenCache.set(tree, index);
@@ -141,12 +144,17 @@ function getLineStarts(tree: Tree, code: string): Uint32Array {
   return table;
 }
 
-function offsetToLineCol(lineStarts: Uint32Array, offset: number): { line: number; character: number } {
+function offsetToLineCol(
+  lineStarts: Uint32Array,
+  offset: number,
+): { line: number; character: number } {
   // Binary search for the last line that starts at or before `offset`
-  let lo = 0, hi = lineStarts.length - 1;
+  let lo = 0,
+    hi = lineStarts.length - 1;
   while (lo < hi) {
     const mid = (lo + hi + 1) >>> 1;
-    if (lineStarts[mid]! <= offset) lo = mid; else hi = mid - 1;
+    if (lineStarts[mid]! <= offset) lo = mid;
+    else hi = mid - 1;
   }
   return { line: lo, character: offset - lineStarts[lo]! };
 }
@@ -280,9 +288,9 @@ function joinParams(params: ParamInfo[]): string {
 // The children index is built once and reused throughout.
 
 export function collectHoverNodes(grammar: Grammar, tree: Tree, code: string): NodeHover[] {
-  const children  = buildChildrenIndex(tree);
+  const children = buildChildrenIndex(tree);
   const lineStarts = getLineStarts(tree, code);
-  const symbols   = new Map<string, string>();
+  const symbols = new Map<string, string>();
   const hovers: NodeHover[] = [];
 
   // Declared identifier node IDs — populated as we encounter declarations
@@ -371,7 +379,9 @@ export function collectHoverNodes(grammar: Grammar, tree: Tree, code: string): N
         const type =
           v.type ??
           symbols.get(v.name) ??
-          (v.initNode ? inferExpressionType(grammar, tree, v.initNode, symbols, v.immutable) : null) ??
+          (v.initNode
+            ? inferExpressionType(grammar, tree, v.initNode, symbols, v.immutable)
+            : null) ??
           grammar.unknownType;
         hovers.push({
           type: "hover",

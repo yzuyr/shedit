@@ -13,6 +13,10 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./plugins/twoslash-hover": {
+      "types": "./dist/plugins/twoslash-hover.d.ts",
+      "import": "./dist/plugins/twoslash-hover.js"
     }
   },
   "scripts": {
