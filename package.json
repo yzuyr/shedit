@@ -14,34 +14,20 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
     },
-    "./plugins/twoslash-hover": {
-      "types": "./dist/plugins/twoslash-hover.d.ts",
-      "import": "./dist/plugins/twoslash-hover.js"
-    },
     "./editor.css": {
       "import": "./dist/editor.css"
     }
   },
   "scripts": {
-    "build": "tsdown && bun run styles",
+    "build": "tsdown",
     "test": "bun --hot test/index.html",
     "demo": "bun build test/index.html --outdir demo",
-    "styles": "bunx @tailwindcss/cli -i ./src/editor.css -o ./dist/editor.css",
     "fmt": "oxfmt"
   },
-  "dependencies": {
-    "@sylphx/synth": "^0.3.2",
-    "twoslash-protocol": "^0.3.6"
-  },
   "devDependencies": {
-    "@sylphx/synth-js": "^0.3.3",
-    "@sylphx/synth-rust": "^0.3.1",
-    "@tailwindcss/cli": "^4.2.2",
     "@types/bun": "latest",
     "oxfmt": "^0.41.0",
-    "tailwindcss": "^4.2.2",
-    "tsdown": "^0.21.4",
-    "zod": "^4.3.6"
+    "tsdown": "^0.21.4"
   },
   "peerDependencies": {
     "shiki": "^4",
