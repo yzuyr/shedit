@@ -17,13 +17,16 @@
     "./plugins/twoslash-hover": {
       "types": "./dist/plugins/twoslash-hover.d.ts",
       "import": "./dist/plugins/twoslash-hover.js"
+    },
+    "./editor.css": {
+      "import": "./dist/editor.css"
     }
   },
   "scripts": {
     "build": "tsdown && bun run styles",
     "test": "bun --hot test/index.html",
     "demo": "bun build test/index.html --outdir demo",
-    "styles": "bunx @tailwindcss/cli -i ./src/styles.css -o ./dist/styles.css",
+    "styles": "bunx @tailwindcss/cli -i ./src/editor.css -o ./dist/editor.css",
     "fmt": "oxfmt"
   },
   "dependencies": {

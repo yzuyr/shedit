@@ -1,3 +1,4 @@
+import "../dist/editor.css";
 import { createHighlighter } from "shiki";
 import { createShikiEditor, collectHoverNodes, grammars } from "../src";
 import { parse as parseTypeScript } from "@sylphx/synth-js";
