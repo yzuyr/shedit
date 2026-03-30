@@ -2,6 +2,18 @@ import "../dist/editor.css";
 import { createHighlighter } from "shiki";
 import { createShikiEditor } from "../src";
 
+const TS_CODE = `function hello(name: string) {
+  return \`Hello, \${name}!\`;
+}
+
+const greeting = hello("world");`;
+
+const RS_CODE = `fn hello(name: &str) -> String {
+  format!("Hello, {}!", name)
+}
+
+let greeting = hello("world");`;
+
 async function main() {
   const shiki = await createHighlighter({
     langs: ["typescript", "rust"],
@@ -16,12 +28,12 @@ async function main() {
     tabSize: 2,
   });
 
-  // Example: TypeScript
-  editor.setValue(`function hello(name: string) {
-  return \`Hello, \${name}!\`;
-}
+  editor.setValue(TS_CODE);
 
-const greeting = hello("world");`);
+  document.querySelector("#lang-btn")?.addEventListener("click", () => {
+    editor.setLang(editor.getLang() === "typescript" ? "rust" : "typescript");
+    editor.setValue(editor.getLang() === "typescript" ? TS_CODE : RS_CODE);
+  });
 }
 
 main();

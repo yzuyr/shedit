@@ -25,6 +25,8 @@ export interface ShikiEditorOptions {
 export interface ShikiEditorHandle {
   setValue(value: string): void;
   getValue(): string;
+  setLang(newLang: BundledLanguage): void;
+  getLang(): BundledLanguage;
   dispose(): void;
 }
 
@@ -102,6 +104,7 @@ export function createShikiEditor(
 
   let lines: LineRecord[] = [];
   let value = "";
+  let currentLang = lang;
   let disposed = false;
   let tokenizeAbort = new AbortController();
   let scrollRaf = 0;
@@ -249,7 +252,7 @@ export function createShikiEditor(
 
       try {
         const result = shiki.codeToTokens(line.text, {
-          lang,
+          lang: currentLang,
           themes,
           defaultColor: false,
           cssVariablePrefix: "",
@@ -422,6 +425,22 @@ export function createShikiEditor(
     return value;
   }
 
+  function setLang(newLang: BundledLanguage) {
+    if (newLang === currentLang) return;
+    currentLang = newLang;
+    // Mark all lines as dirty to force re-tokenization with new language
+    for (const line of lines) {
+      line.dirty = true;
+      line.grammarState = undefined;
+      line.grammarHash = "";
+    }
+    scheduleTokenize(0);
+  }
+
+  function getLang(): BundledLanguage {
+    return currentLang;
+  }
+
   function dispose() {
     if (disposed) return;
     disposed = true;
@@ -439,5 +458,5 @@ export function createShikiEditor(
 
   setValue(value);
 
-  return { setValue, getValue, dispose };
+  return { setValue, getValue, setLang, getLang, dispose };
 }
